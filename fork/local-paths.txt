@@ -1,0 +1,11 @@
+# Files this fork owns that upstream does not ship.
+#
+# Read through the symlink config/local-paths.txt (created by fork/bootstrap.sh)
+# by two upstream tools: update-system.mjs, which this fork never runs, and
+# validate-system-paths-coverage.mjs, which the test suite runs on every sync.
+# Without the line below every file under fork/ fails that suite as an orphan.
+#
+# One repo-relative path per line; a trailing slash covers the directory.
+# Never list a file upstream ships: the loader refuses it, and such a change is
+# a layer 3 patch that lives in the commit history, not here.
+fork/
