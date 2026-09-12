@@ -1,0 +1,24 @@
+<!--
+  experience.html: the Work Experience partial for the Evidence Sidebar pack.
+
+  Role first, then one meta line carrying employer, location and period, so a
+  reader scanning the left column sees what the candidate did before where.
+  Placeholders: ROLE, COMPANY, PERIOD, BULLETS, and the conditional
+  LOCATION_BLOCK (omitted when the entry has no location).
+
+  The other sections use build-cv-html.mjs's default markup; add a file here
+  named after a section (projects.html, education.html, ...) to take it over.
+-->
+<!--ENTRY-->
+<div class="job">
+  <div class="job-role">{{ROLE}}</div>
+  <div class="job-meta">
+    <span class="job-company">{{COMPANY}}{{LOCATION_BLOCK}}</span>
+    <span class="job-period">{{PERIOD}}</span>
+  </div>
+  <ul>
+    {{BULLETS}}
+  </ul>
+</div>
+<!--LOCATION_BLOCK--><span class="job-location">, {{LOCATION}}</span><!--/LOCATION_BLOCK-->
+<!--/ENTRY-->
