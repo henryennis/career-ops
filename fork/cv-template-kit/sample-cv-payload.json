@@ -1,0 +1,93 @@
+{
+  "lang": "en",
+  "page_format": "a4",
+  "candidate": {
+    "name": "Morgan Vale",
+    "phone": "+61 400 000 000",
+    "email": "morgan.vale@example.com",
+    "linkedin": { "url": "https://www.linkedin.com/in/morgan-vale-example", "display": "linkedin.com/in/morgan-vale-example" },
+    "github": { "url": "https://github.com/morgan-vale-example", "display": "github.com/morgan-vale-example" },
+    "location": "Melbourne, Australia"
+  },
+  "summary": "Platform engineer with nine years across logistics and analytics companies. Runs the Kubernetes estate and the delivery pipeline for a 40-engineer organisation, and is the person paged when either breaks. Prefers boring infrastructure, written-down runbooks and deleting services.",
+  "competencies": [
+    "Kubernetes",
+    "Delivery pipelines",
+    "Incident command",
+    "Cost control",
+    "Terraform",
+    "Observability"
+  ],
+  "experience": [
+    {
+      "company": "Halcyon Freight",
+      "role": "Staff Platform Engineer",
+      "location": "Melbourne",
+      "dates": "March 2022 - Present",
+      "bullets": [
+        "Consolidated 14 Kubernetes clusters into 3, cutting the monthly cloud bill by 31% and the on-call rota from 9 engineers to 4.",
+        "Rebuilt the delivery pipeline on GitHub Actions and Argo CD; median lead time from merge to production fell from 2 days to 35 minutes.",
+        "Ran incident command for 22 customer-facing incidents; wrote the postmortem template the whole engineering organisation now uses.",
+        "Introduced Terraform modules with policy checks, so a new environment is a pull request instead of a two-week ticket."
+      ]
+    },
+    {
+      "company": "Brightwater Analytics",
+      "role": "Senior Site Reliability Engineer",
+      "location": "Sydney",
+      "dates": "July 2018 - February 2022",
+      "bullets": [
+        "Moved 60 batch jobs from cron on a single host to Kubernetes CronJobs with Prometheus alerting; missed runs went from weekly to zero in a quarter.",
+        "Designed the observability stack (Prometheus, Grafana, Loki) and the SLOs the product teams still report against.",
+        "Cut PostgreSQL storage cost 45% by moving cold partitions to object storage with a Go tool the team still maintains."
+      ]
+    },
+    {
+      "company": "Kestrel Systems",
+      "role": "Software Engineer",
+      "location": "Brisbane",
+      "dates": "January 2016 - June 2018",
+      "bullets": [
+        "Built the Go services behind the customer portal and the Python tooling that deployed them.",
+        "Owned the CI servers; halved build times by caching Docker layers and splitting the test suite."
+      ]
+    }
+  ],
+  "projects": [
+    {
+      "name": "cluster-ledger",
+      "badge": "Open source",
+      "description": "A Go command that attributes Kubernetes spend to teams from labels and billing exports; used by three companies.",
+      "tech": "Go, Kubernetes, BigQuery",
+      "url": "https://github.com/morgan-vale-example/cluster-ledger"
+    },
+    {
+      "name": "Runbook linter",
+      "description": "Checks incident runbooks for dead links and stale owners on every commit.",
+      "tech": "Python, GitHub Actions"
+    }
+  ],
+  "education": [
+    {
+      "title": "Bachelor of Engineering (Software)",
+      "org": "Queensland University of Technology",
+      "location": "Brisbane",
+      "year": "2015",
+      "description": "First-class honours. Thesis on scheduling for container workloads."
+    }
+  ],
+  "certifications": [
+    { "title": "Certified Kubernetes Administrator", "org": "CNCF", "year": "2021" },
+    { "title": "HashiCorp Certified: Terraform Associate", "org": "HashiCorp", "year": "2023" }
+  ],
+  "awards": [
+    { "title": "Engineering Excellence Award", "org": "Halcyon Freight", "year": "2024" }
+  ],
+  "interests": ["Trail running", "Amateur radio", "Baking sourdough"],
+  "skills": [
+    { "category": "Platform", "items": ["Kubernetes", "Terraform", "Argo CD", "Docker", "Linux"] },
+    { "category": "Observability", "items": ["Prometheus", "Grafana", "Loki", "SLOs"] },
+    { "category": "Languages", "items": ["Go", "Python", "Bash", "SQL"] },
+    { "category": "Data", "items": ["PostgreSQL", "BigQuery", "Kafka"] }
+  ]
+}
