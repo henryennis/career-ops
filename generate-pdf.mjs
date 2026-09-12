@@ -61,15 +61,25 @@ const PDF_PAGE_MARGIN = '0.6in';
 // land inside that window. A `const` cannot un-read an env var, so the guard
 // then compared perfectly valid repo paths against another test's temp dir and
 // refused to write, intermittently and only under the full suite. Memoized on
-// the variable's own value: same cost as the const while nothing changes, and
-// self-correcting the moment it does. Same defect class as #3159.
+// the variables' own values: same cost as the const while nothing changes, and
+// self-correcting the moment one of them does. Same defect class as #3159.
+//
+// Anchored to the data root (getCareerOpsRoot), as `workspaceRoot` above and
+// every other read in this file are. Anchoring it to __dirname made the guard
+// disagree with the rest of the module for anyone whose personal files live
+// outside the checkout (the layout the .career-ops-data marker exists for):
+// cv.md and the profile were read from the data root while a render into that
+// same root's output/ was refused as escaping the workspace, unless the tracker
+// path happened to be overridden by CAREER_OPS_TRACKER. The cache key therefore
+// carries every variable the root can depend on, not just the tracker override.
+const ROOT_CACHE_VARIABLES = ['CAREER_OPS_TRACKER', 'CAREER_OPS_ROOT', 'CAREER_OPS_DATA_DIR'];
 let __rootCache = { key: null, root: null, canonical: null };
 function refreshRootCache() {
-  const key = process.env.CAREER_OPS_TRACKER || '';
+  const key = ROOT_CACHE_VARIABLES.map((name) => process.env[name] || '').join('\n');
   if (__rootCache.key !== key) {
     // Always re-derive: falling back to the import-time const when the variable
     // is unset would hand back the very value the poisoned import froze.
-    const root = resolveWorkspaceRoot(resolveTrackerPath(__dirname));
+    const root = resolveWorkspaceRoot(resolveTrackerPath(getCareerOpsRoot()));
     __rootCache = { key, root, canonical: realpathSync(root) };
   }
   return __rootCache;
