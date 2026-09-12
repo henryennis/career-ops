@@ -27,7 +27,7 @@
 
 import { readFile, writeFile, stat, mkdir } from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
-import { resolve, dirname, basename, join, extname, isAbsolute } from 'path';
+import { resolve, dirname, basename, join, extname, isAbsolute, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
 import { stripEmptySections } from './cv-sections-core.mjs';
@@ -50,6 +50,10 @@ const PHOTO_MIME_BY_EXT = new Map([
 ]);
 const PHOTO_STYLES = new Set(['rounded', 'circle', 'square']);
 const IMAGE_DATA_URL_RE = /^data:image\/(?:png|jpeg|webp|gif);base64,[a-z0-9+/=\s]+$/i;
+
+// The same reference form generate-pdf.mjs inlines for the repo-level fonts/.
+const PACK_FONT_REF_RE = /url\(\s*(['"]?)\.\/fonts\/([^'")\s]+)\1\s*\)/g;
+const FONT_MIME = { woff2: 'font/woff2', woff: 'font/woff', otf: 'font/otf', ttf: 'font/ttf' };
 
 const DEFAULT_SECTION_TITLES = {
   summary: 'Professional Summary',
@@ -657,6 +661,33 @@ function renderReport(payload, partials) {
   return { substitutions, candidate };
 }
 
+// Inline the fonts a pack keeps beside its template. url('./fonts/<file>') is
+// the form the shipped templates use for the repo-level fonts/ directory, which
+// generate-pdf.mjs inlines at render time relative to the code tree. A pack
+// outside the code tree cannot reach that directory, and a relative reference
+// in the built HTML would resolve against wherever the HTML is written, so a
+// pack's own fonts/ is resolved here, while the template path is still known.
+// A reference with no matching pack file is left for generate-pdf.mjs, so a
+// template with no fonts/ beside it comes out byte-identical.
+function inlinePackFonts(html, templatePath) {
+  const fontsDir = join(dirname(templatePath), 'fonts');
+  if (!existsSync(fontsDir)) return html;
+  const encoded = new Map();
+  return html.replace(PACK_FONT_REF_RE, (match, _quote, name) => {
+    if (!encoded.has(name)) {
+      const fontPath = resolve(fontsDir, name);
+      const inside = relative(fontsDir, fontPath);
+      let dataUrl = null;
+      if (!inside.startsWith('..') && !isAbsolute(inside) && existsSync(fontPath)) {
+        const mime = FONT_MIME[extname(name).slice(1).toLowerCase()] || 'application/octet-stream';
+        dataUrl = `url('data:${mime};base64,${readFileSync(fontPath).toString('base64')}')`;
+      }
+      encoded.set(name, dataUrl);
+    }
+    return encoded.get(name) || match;
+  });
+}
+
 // Merge a payload into the template and return the final HTML (throws on any
 // unresolved {{PLACEHOLDER}} so a malformed payload fails loudly, not silently).
 function renderHtml(template, payload, templatePath) {
@@ -678,6 +709,9 @@ function renderHtml(template, payload, templatePath) {
   for (const [key, value] of Object.entries(substitutions)) {
     html = html.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), () => value);
   }
+
+  // A pack's own fonts, when it ships any — see inlinePackFonts.
+  if (templatePath) html = inlinePackFonts(html, templatePath);
 
   const unresolved = html.match(PLACEHOLDER_RE);
   if (unresolved) {
