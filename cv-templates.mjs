@@ -3,17 +3,63 @@
 // Single source of truth for "which template file, and is it usable?".
 // Backward-compatible: with no config and no named files, resolves the base
 // templates/cv-template.html (name "standard"), identical to prior behavior.
+//
+// Templates are discovered in two roots (see templateRoots): the code tree's
+// templates/ and, when a data root is configured, the data root's templates/.
+// A pack kept in the data root lists and resolves exactly like a shipped one.
 
-import { readdirSync, readFileSync, existsSync, statSync } from 'fs';
+import { readdirSync, readFileSync, existsSync, statSync, realpathSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import * as yaml from 'js-yaml';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TEMPLATES_DIR = resolve(__dirname, 'templates');
-const DEFAULT_PROFILE_PATH =
-  process.env.CAREER_OPS_PROFILE || resolve(__dirname, 'config', 'profile.yml');
+
+// config/profile.yml is a user-layer file, so it lives in the data root: every
+// other reader of it (scan.mjs, company-history.mjs, followup-cadence.mjs)
+// resolves it from getCareerOpsRoot(). Anchoring it to the code directory meant
+// a `cv.template` default in a data root's profile was silently ignored while
+// generate-pdf.mjs read `style:` and `cv.sections` from the very same file.
+// Computed per call rather than at import so the environment is read when the
+// resolver runs, which is what lets a test point it at a fixture.
+function defaultProfilePath() {
+  return process.env.CAREER_OPS_PROFILE || resolve(getCareerOpsRoot(), 'config', 'profile.yml');
+}
+
+// One canonical spelling for "is this the same path?". A path that does not
+// exist yet keeps its lexical form, which is the right answer for a data root
+// whose templates/ has not been created.
+function canonicalPath(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
+ * The directories templates are discovered in, in order: the code tree's
+ * templates/, then the data root's templates/ when the data root is a
+ * different directory.
+ *
+ * The second root is what lets a user keep a template pack with their personal
+ * files: it survives `update-system.mjs apply`, it is never committed to a
+ * public fork, and the pack still lists and resolves by name like a shipped
+ * one. With no data root configured both spell the same directory and it is
+ * scanned once, so a checkout with no marker sees exactly the templates it saw
+ * before.
+ *
+ * @returns {string[]} Absolute directories; a missing one is skipped by discovery.
+ */
+export function templateRoots() {
+  const roots = [DEFAULT_TEMPLATES_DIR];
+  const userRoot = resolve(getCareerOpsRoot(), 'templates');
+  if (canonicalPath(userRoot) !== canonicalPath(DEFAULT_TEMPLATES_DIR)) roots.push(userRoot);
+  return roots;
+}
 
 export const KINDS = {
   cv: {
@@ -79,8 +125,9 @@ export function parseMeta(path) {
   return meta;
 }
 
-// Build the entry a discovered template file contributes.
-function entryFor(parsed, path, pack) {
+// Build the entry a discovered template file contributes. `root` is the
+// templates directory the file was found under (one of templateRoots()).
+function entryFor(parsed, path, pack, root) {
   const meta = parseMeta(path);
   return {
     name: parsed.name,
@@ -89,6 +136,7 @@ function entryFor(parsed, path, pack) {
     format: parsed.format,
     meta,
     pack,
+    root,
   };
 }
 
@@ -133,52 +181,59 @@ function entryFor(parsed, path, pack) {
 // collisions.
 //
 // Returns Map<name, entry>. A name claimed twice throws — see assertNoCollision.
-function discover(kind, { dir, format }) {
+//
+// `dirs` is the list of roots to scan, in order. The same collision rule spans
+// them: a name present in the code tree and again in the data root is an
+// error naming both files, never a precedence decision.
+function discover(kind, { dirs, format }) {
   const cfg = KINDS[kind];
   const found = new Map();
-  if (!existsSync(dir)) return found;
 
-  const claim = (parsed, path, pack) => {
-    if (parsed.format !== format) return;
-    const prior = found.get(parsed.name);
-    if (prior) assertNoCollision(parsed.name, prior.path, path, dir);
-    found.set(parsed.name, entryFor(parsed, path, pack));
-  };
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
 
-  // One listing serves both passes. Reading twice would let the flat pass and
-  // the pack pass see different directory states, and the collision check spans
-  // them: a file present for one read and gone for the other decides whether a
-  // name is ambiguous. A single snapshot makes that verdict reproducible.
-  const top = readdirSync(dir, { withFileTypes: true });
+    const claim = (parsed, path, pack) => {
+      if (parsed.format !== format) return;
+      const prior = found.get(parsed.name);
+      if (prior) assertNoCollision(parsed.name, prior, { path, root: dir });
+      found.set(parsed.name, entryFor(parsed, path, pack, dir));
+    };
 
-  // Flat templates. Unchanged from before packs existed, including the fact
-  // that a symlinked file is read through like any other.
-  for (const d of top) {
-    const parsed = parseFilename(cfg.prefix, d.name);
-    if (parsed) claim(parsed, resolve(dir, d.name), null);
-  }
+    // One listing serves both passes. Reading twice would let the flat pass and
+    // the pack pass see different directory states, and the collision check spans
+    // them: a file present for one read and gone for the other decides whether a
+    // name is ambiguous. A single snapshot makes that verdict reproducible.
+    const top = readdirSync(dir, { withFileTypes: true });
 
-  // Packs, one level down.
-  for (const d of top) {
-    const packDir = resolve(dir, d.name);
-    if (!d.isDirectory()) {
-      // statSync follows the link; it throws on a broken one, which is not a pack.
-      if (!d.isSymbolicLink()) continue;
-      try {
-        if (!statSync(packDir).isDirectory()) continue;
-      } catch {
-        continue;
+    // Flat templates. Unchanged from before packs existed, including the fact
+    // that a symlinked file is read through like any other.
+    for (const d of top) {
+      const parsed = parseFilename(cfg.prefix, d.name);
+      if (parsed) claim(parsed, resolve(dir, d.name), null);
+    }
+
+    // Packs, one level down.
+    for (const d of top) {
+      const packDir = resolve(dir, d.name);
+      if (!d.isDirectory()) {
+        // statSync follows the link; it throws on a broken one, which is not a pack.
+        if (!d.isSymbolicLink()) continue;
+        try {
+          if (!statSync(packDir).isDirectory()) continue;
+        } catch {
+          continue;
+        }
       }
-    }
-    let inner;
-    try {
-      inner = readdirSync(packDir);
-    } catch {
-      continue; // unreadable directory is not a pack
-    }
-    for (const file of inner) {
-      const parsed = parseFilename(cfg.prefix, file);
-      if (parsed) claim(parsed, resolve(packDir, file), d.name);
+      let inner;
+      try {
+        inner = readdirSync(packDir);
+      } catch {
+        continue; // unreadable directory is not a pack
+      }
+      for (const file of inner) {
+        const parsed = parseFilename(cfg.prefix, file);
+        if (parsed) claim(parsed, resolve(packDir, file), d.name);
+      }
     }
   }
 
@@ -193,20 +248,32 @@ function discover(kind, { dir, format }) {
 // loser would simply stop being rendered, silently, with nothing in the output
 // naming the file that won. Failing at discovery costs one clear error and
 // makes the ambiguity impossible to ship past.
-function assertNoCollision(name, a, b, dir) {
-  const rel = (p) => p.slice(dir.length + 1) || p;
-  const [x, y] = [rel(a), rel(b)].sort();
+//
+// Two files under one root are named relative to it. Across roots (a shipped
+// template and a data-root pack claiming one name) both paths are shown in
+// full, because a name relative to one root points at nothing in the other.
+function assertNoCollision(name, a, b) {
+  const sameRoot = a.root === b.root;
+  const shown = (entry) => (sameRoot ? entry.path.slice(entry.root.length + 1) || entry.path : entry.path);
+  const [x, y] = [shown(a), shown(b)].sort();
   throw new Error(
     `Template name "${name}" is claimed by two files: ${x} and ${y}. `
       + `A name must resolve to one template — rename one, or remove the one you no longer use.`
   );
 }
 
-export function listTemplates(kind, { dir = DEFAULT_TEMPLATES_DIR, format = 'html' } = {}) {
+// An explicit `dir` scans that directory alone, which is what every caller
+// that passes one (the test fixtures) means by it. Without one, discovery
+// covers every root.
+function rootsFor(dir) {
+  return dir ? [dir] : templateRoots();
+}
+
+export function listTemplates(kind, { dir, format = 'html' } = {}) {
   const cfg = KINDS[kind];
   if (!cfg) throw new Error(`Unknown template kind: ${kind}`);
   assertFormat(format);
-  return [...discover(kind, { dir, format }).values()].sort((a, b) => a.name.localeCompare(b.name));
+  return [...discover(kind, { dirs: rootsFor(dir), format }).values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function validateTemplate(path, kind) {
@@ -217,7 +284,7 @@ export function validateTemplate(path, kind) {
   return { ok: missing.length === 0, missing };
 }
 
-export function loadProfileDefault(kind, { profilePath = DEFAULT_PROFILE_PATH } = {}) {
+export function loadProfileDefault(kind, { profilePath = defaultProfilePath() } = {}) {
   const cfg = KINDS[kind];
   if (!cfg) throw new Error(`Unknown template kind: ${kind}`);
   if (!existsSync(profilePath)) return null;
@@ -236,9 +303,9 @@ export function resolveTemplate(kind, name, opts = {}) {
   const cfg = KINDS[kind];
   if (!cfg) throw new Error(`Unknown template kind: ${kind}`);
   const {
-    dir = DEFAULT_TEMPLATES_DIR,
+    dir,
     format = 'html',
-    profilePath = DEFAULT_PROFILE_PATH,
+    profilePath = defaultProfilePath(),
     fallback = false,
   } = opts;
   assertFormat(format);
@@ -252,7 +319,7 @@ export function resolveTemplate(kind, name, opts = {}) {
   // would find flat templates only: a pack would list fine and then throw here,
   // which is the failure mode that passes review because the demo path works.
   // Every by-name caller lands here — build-cv-latex.mjs, generate-cover-letter.mjs.
-  const found = discover(kind, { dir, format });
+  const found = discover(kind, { dirs: rootsFor(dir), format });
 
   let entry = found.get(chosen);
   if (!entry && fallback && chosen !== 'standard') {
