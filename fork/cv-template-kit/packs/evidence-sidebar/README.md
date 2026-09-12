@@ -28,6 +28,10 @@ The DOM puts `<main>` before `<aside>`; CSS grid places the rail on the right. T
 - Headings carry `class="section-title"`, which the section-order guard and `verify-ats.mjs` both read.
 - The style tokens in the profile apply: `accent_color` recolours the rule, the headings and the bars, `font_family` and `font_size` the whole page, `margin` the page margin. `--rail-width` and `--rail-tint` are the pack's own variables at the top of the stylesheet.
 
+## Past the first page
+
+The rail is laid out once, on the first page. A CV that runs to a second or third page keeps the main column at its first-page width and leaves the rail's space empty on every later page: checked with a nine-role fictional payload that rendered to three pages, with no overlap and nothing clipped. If your CV runs long, keep to the two-page budget the PDF step already warns about, or accept the empty rail on later pages; the shipped single-column templates do not have the question.
+
 ## The ATS trade-off, stated plainly
 
 `verify-ats.mjs` scores the sample render 92/100, grade A, with the same two warnings the shipped ATS pack earns: it reads `font-family: var(--font-family)` literally and flags the variable as a non-standard font, and it flags the `display: none` on the contact separators as possible hidden text. Neither is a real parse problem. What the audit cannot measure is the one that matters: this is a two-column page. CSS grid is not a `<table>` and not `column-count`, so the audit does not penalise it, but a parser that works from rendered positions rather than document order can interleave the rail with the main column, and a skills list read mid-sentence is worse than none. Send this pack to people. For a portal that parses the PDF before a person sees it, render the same payload through the shipped `ats` template instead; it is one name in the same command.
