@@ -63,6 +63,21 @@ node cv-templates.mjs resolve cv modern  # absolute path to fill
 
 **Single column, always.** All colour in these variants is decoration over a strictly top-to-bottom text flow, so PDF extraction order is unaffected. Multi-column page layouts are the classic ATS parse failure and none of these use one.
 
+### Template packs in the data root
+
+`cv-templates.mjs` discovers templates in two roots: this directory, and `<data root>/templates` when a data root is configured (`path-resolver.mjs`: `CAREER_OPS_ROOT` or `CAREER_OPS_DATA_DIR`, else the `.career-ops-data` marker). A pack there has the same shape as one here, `templates/<dir>/cv-template.<name>.html` beside its own `sections/`, and lists, resolves and validates by the same rules:
+
+```bash
+node cv-templates.mjs list cv                # shipped templates plus <data root>/templates
+node cv-templates.mjs resolve cv <name>      # absolute path, wherever the pack lives
+```
+
+The data root is where a pack belongs when the checkout has to stay clean: `update-system.mjs apply` never touches it, and a public fork never commits it. The `cv.template` default is read from the data root's `config/profile.yml`, the same file `generate-pdf.mjs` reads `style:` and `cv.sections` from.
+
+One name, one file, across both roots: a data-root template that claims a shipped name (`cv-template.modern.html`) fails discovery with a message naming both files, exactly as two files in this directory would.
+
+**Fonts.** The shipped templates use system font stacks. A pack that ships its own faces keeps them in `<pack>/fonts/` and references them as `url('./fonts/<file>')`; `build-cv-html.mjs` inlines those as data URLs while it still knows where the template is, so the built HTML renders the same from `output/`, in a browser and in `generate-pdf.mjs`. A reference with no matching file in the pack is left alone and resolved by `generate-pdf.mjs` against the repo-level `fonts/` as before. Read the ATS note above before bundling a variable woff2: extraction can inject spaces inside words.
+
 ### resume-template.html
 
 Resume-branded variant of `cv-template.html` for US/industry job applications. Key differences from the CV template:
