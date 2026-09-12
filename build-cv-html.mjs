@@ -24,15 +24,23 @@
 //   entry-level field names (COMPANY, PERIOD, ROLE, etc.). When no partial file
 //   is found the built-in fallback builder is used, preserving full backward
 //   compatibility.
+//
+// Pack renderers:
+//   A template pack may also ship a render.mjs beside its template file. Its
+//   `render` function then produces the document instead of the placeholder
+//   fill, from the validated payload plus this builder's own helpers — see
+//   "Pack renderers" below and templates/README.md. It is loaded only for a
+//   template cv-templates.mjs discovers as a pack, never from an arbitrary path.
 
 import { readFile, writeFile, stat, mkdir } from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
 import { resolve, dirname, basename, join, extname, isAbsolute, relative } from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { tmpdir } from 'os';
 import { stripEmptySections } from './cv-sections-core.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { hasRequiredFields, validatePayload } from './lib/cv-payload-schema.mjs';
+import { findTemplateEntry } from './cv-templates.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_ROOT = getCareerOpsRoot();
@@ -51,6 +59,7 @@ const PHOTO_MIME_BY_EXT = new Map([
 const PHOTO_STYLES = new Set(['rounded', 'circle', 'square']);
 const IMAGE_DATA_URL_RE = /^data:image\/(?:png|jpeg|webp|gif);base64,[a-z0-9+/=\s]+$/i;
 
+const PACK_RENDERER_FILE = 'render.mjs';
 // The same reference form generate-pdf.mjs inlines for the repo-level fonts/.
 const PACK_FONT_REF_RE = /url\(\s*(['"]?)\.\/fonts\/([^'")\s]+)\1\s*\)/g;
 const FONT_MIME = { woff2: 'font/woff2', woff: 'font/woff', otf: 'font/otf', ttf: 'font/ttf' };
@@ -676,7 +685,62 @@ function renderReport(payload, partials) {
     SECTION_SKILLS: escapeHtml(sectionTitles.skills),
     SKILLS: buildSkills(payload.skills, partials.get('skills')),
   };
-  return { substitutions, candidate };
+  return { substitutions, candidate, sectionTitles, pageWidth };
+}
+
+// ── Pack renderers ──────────────────────────────────────────────────────────
+//
+// A template pack may ship a render.mjs beside its template file:
+//
+//   export async function render({ payload, template, options, helpers }) {
+//     return helpers.fillTemplate(template, { SKILLS: myOwnSkillsMarkup });
+//   }
+//
+// `payload` is the validated payload (candidate photo already prepared),
+// `template` the template text, `options` what this builder resolved on the
+// way in (templatePath, packDirectory, lang, pageFormat, pageWidth,
+// sectionTitles, candidate, the pack's partials, and `substitutions`, the
+// complete {{PLACEHOLDER}} map the default fill would apply), and `helpers` the
+// builder's own functions: escapeHtml, sanitizeUrl, sanitizeImageSrc,
+// joinItems, the section builders, buildContactRow, buildPhoto,
+// stripEmptySections (bound to this payload), and fillTemplate, which is the
+// default fill itself so a renderer can keep it for the parts it does not
+// redo. It returns the full HTML document (a Promise of one is fine).
+//
+// What still runs on the renderer's output, and what it means for the guards:
+//   - pack fonts are inlined and any leftover {{PLACEHOLDER}} fails the build,
+//     exactly as for a template;
+//   - stripEmptySections runs by marker, so a renderer that keeps the
+//     `<!-- WORK EXPERIENCE -->`-style markers and the `<!-- END -->` sentinel
+//     gets empty sections dropped for free, and one that drops a marker gets
+//     the documented fail-safe (that section stays, header and all);
+//   - generate-pdf.mjs then applies `cv.sections` from the profile by the same
+//     markers, checks section order and ATS headings by the `.section-title`
+//     class, and runs the fact gate over the visible text. Keep the markers
+//     and the class and every guard keeps working; drop them and the two
+//     section-order tools degrade to no-ops for those sections, while the fact
+//     gate is unaffected.
+//
+// The renderer is loaded only for a template cv-templates.mjs discovers as a
+// pack (templates/<dir>/ in the code tree or in the data root). A render.mjs
+// beside a template handed over by arbitrary path is reported and ignored:
+// running code from wherever a command-line argument points would turn the
+// template argument into an execution vector, and discovery is a boundary the
+// user already controls. Inside it the trust model is the one plugins/ has: a
+// renderer is the user's own code and runs as the user.
+async function loadPackRenderer(templatePath) {
+  const rendererPath = join(dirname(templatePath), PACK_RENDERER_FILE);
+  if (!existsSync(rendererPath)) return null;
+  const entry = findTemplateEntry('cv', templatePath);
+  if (!entry || !entry.pack) {
+    console.error(`Warning: ${rendererPath} ignored — ${templatePath} is not a discovered template pack, so its renderer does not run`);
+    return null;
+  }
+  const module = await import(pathToFileURL(rendererPath).href);
+  if (typeof module.render !== 'function') {
+    throw new Error(`${rendererPath} must export a render function`);
+  }
+  return { path: rendererPath, render: module.render };
 }
 
 // Inline the fonts a pack keeps beside its template. url('./fonts/<file>') is
@@ -708,27 +772,64 @@ function inlinePackFonts(html, templatePath) {
 
 // Merge a payload into the template and return the final HTML (throws on any
 // unresolved {{PLACEHOLDER}} so a malformed payload fails loudly, not silently).
-function renderHtml(template, payload, templatePath) {
+// `renderer` is a pack renderer from loadPackRenderer(), or null for the
+// placeholder fill.
+async function renderHtml(template, payload, templatePath, renderer = null) {
   // Load section partials from the sections/ directory co-located with the
   // template. Falls back to built-in builders when no partials directory exists.
   const partials = templatePath ? loadSectionPartials(templatePath) : new Map();
 
-  const { substitutions, candidate } = renderReport(payload, partials);
+  const { substitutions, candidate, sectionTitles, pageWidth } = renderReport(payload, partials);
 
-  // The contact row and photo carry conditional markup (dropped separators /
-  // no <img>), so they are rebuilt as whole blocks before placeholder fill.
-  let html = template.replace(CONTACT_ROW_RE, () => buildContactRow(candidate));
-  html = html.replace(/\{\{PHOTO\}\}/g, () => buildPhoto(candidate, candidate.name));
+  // The default fill. The contact row and photo carry conditional markup
+  // (dropped separators / no <img>), so they are rebuilt as whole blocks before
+  // placeholder fill; the optional sections with no entries are dropped so an
+  // absent one leaves no bare header behind (see cv-sections-core.mjs). Also
+  // handed to a pack renderer as helpers.fillTemplate, with `overrides` for the
+  // placeholders it computes itself.
+  const fillTemplate = (text, overrides = {}) => {
+    let html = text.replace(CONTACT_ROW_RE, () => buildContactRow(candidate));
+    html = html.replace(/\{\{PHOTO\}\}/g, () => buildPhoto(candidate, candidate.name));
+    html = stripEmptySections(html, payload, 'html');
+    for (const [key, value] of Object.entries({ ...substitutions, ...overrides })) {
+      html = html.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), () => value);
+    }
+    return html;
+  };
 
-  // Drop the optional sections (projects, education) that have no entries, so
-  // an absent one leaves no bare header behind. See cv-sections-core.mjs.
-  html = stripEmptySections(html, payload, 'html');
-
-  for (const [key, value] of Object.entries(substitutions)) {
-    html = html.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), () => value);
+  let html;
+  if (renderer) {
+    html = await renderer.render({
+      payload,
+      template,
+      options: {
+        templatePath,
+        packDirectory: dirname(templatePath),
+        lang: payload.lang || 'en',
+        pageFormat: PAGE_WIDTHS[payload.page_format] ? payload.page_format : 'letter',
+        pageWidth,
+        sectionTitles,
+        candidate,
+        partials,
+        substitutions,
+      },
+      helpers: {
+        escapeHtml, sanitizeUrl, sanitizeImageSrc, joinItems, fillTemplate,
+        buildContactRow, buildPhoto, buildCompetencies, buildExperience, buildProjects,
+        buildEducation, buildCertifications, buildAwards, buildInterests, buildSkills,
+        stripEmptySections: (text) => stripEmptySections(text, payload, 'html'),
+      },
+    });
+    if (typeof html !== 'string' || !html.trim()) {
+      throw new Error(`${renderer.path} returned ${typeof html === 'string' ? 'an empty document' : typeof html}; a renderer must return the full HTML document as a string`);
+    }
+    // By marker, on the renderer's output too, so a renderer that keeps the
+    // markers needs no code of its own for empty sections. Idempotent: a
+    // renderer that already called helpers.stripEmptySections loses nothing.
+    html = stripEmptySections(html, payload, 'html');
+  } else {
+    html = fillTemplate(template);
   }
-
-  // A pack's own fonts, when it ships any — see inlinePackFonts.
   if (templatePath) html = inlinePackFonts(html, templatePath);
 
   const unresolved = html.match(PLACEHOLDER_RE);
@@ -797,6 +898,12 @@ async function main() {
     console.error('  (e.g. sections/experience.html). Partials control the DOM');
     console.error('  structure, tag names, and class names for each section.');
     console.error('  When no partial file is found the built-in builder is used.');
+    console.error('');
+    console.error('  Pack renderers:');
+    console.error('  A discovered template pack (templates/<dir>/ in the code tree or');
+    console.error('  the data root) may ship a render.mjs beside its template. Its');
+    console.error('  exported render({ payload, template, options, helpers }) then');
+    console.error('  produces the document; see templates/README.md for the contract.');
     process.exit(args.includes('--help') ? 0 : 1);
   }
 
@@ -848,14 +955,22 @@ async function main() {
   const template = await readFile(templatePath, 'utf-8');
 
   let html;
+  let renderer = null;
   try {
-    html = renderHtml(template, payload, templatePath);
+    renderer = await loadPackRenderer(templatePath);
+    html = await renderHtml(template, payload, templatePath, renderer);
   } catch (err) {
-    console.error(err.message);
+    // A renderer is the user's own code: when one is in play they are debugging
+    // it, and the stack names the line. The placeholder path keeps the one-line
+    // message it always had.
+    const rendererInvolved = existsSync(join(dirname(templatePath), PACK_RENDERER_FILE));
+    console.error(rendererInvolved ? (err.stack || err.message) : err.message);
     process.exit(1);
   }
 
-  await writeAndReport(html, absOutput, payload, preview ? { status: 'preview-ready', warnings } : { warnings });
+  const extra = preview ? { status: 'preview-ready', warnings } : { warnings };
+  if (renderer) extra.renderer = renderer.path;
+  await writeAndReport(html, absOutput, payload, extra);
   process.exit(0);
 }
 
@@ -915,7 +1030,7 @@ async function runSelfTest() {
 
   let html;
   try {
-    html = renderHtml(template, sample, TEMPLATE_PATH);
+    html = await renderHtml(template, sample, TEMPLATE_PATH);
   } catch (err) {
     console.error(`Self-test failed: ${err.message}`);
     process.exit(1);
@@ -949,7 +1064,7 @@ async function runSelfTest() {
   // Guard the absent-field side of the same case: omitting candidate.github
   // must drop both its anchor and its separator, leaving no dangling item.
   const { github, ...candidateWithoutGithub } = sample.candidate;
-  const htmlWithoutGithub = renderHtml(template, { ...sample, candidate: candidateWithoutGithub });
+  const htmlWithoutGithub = await renderHtml(template, { ...sample, candidate: candidateWithoutGithub });
   const countSeparators = (h) => (h.match(/class="separator"/g) || []).length;
   if (htmlWithoutGithub.includes('github.com/test')) {
     console.error('Self-test failed: github contact link rendered when candidate.github is absent');
@@ -963,7 +1078,7 @@ async function runSelfTest() {
   // Guard the rejected-scheme side: sanitizeUrl() must reject javascript:/data:
   // github URLs, which must drop the item and separator exactly like an
   // absent field, never fall through to an empty href="".
-  const htmlWithRejectedGithub = renderHtml(template, {
+  const htmlWithRejectedGithub = await renderHtml(template, {
     ...sample,
     candidate: { ...sample.candidate, github: { url: 'javascript:alert(1)', display: 'github.com/test' } },
   });
@@ -1025,7 +1140,7 @@ async function runSelfTest() {
 
   // Guard that a project's bullets array renders one DESC_BLOCK per bullet
   // (2+ bullets, no description), while a plain description stays a single block.
-  const multiBulletHtml = renderHtml(template, {
+  const multiBulletHtml = await renderHtml(template, {
     ...sample,
     projects: [{ name: 'Multi', bullets: ['First bullet', 'Second bullet', 'Third bullet'] }],
   }, TEMPLATE_PATH);
@@ -1033,7 +1148,7 @@ async function runSelfTest() {
   // re-read as a template reference (which would fail as an unresolved marker).
   let literalHtml;
   try {
-    literalHtml = renderHtml(template, {
+    literalHtml = await renderHtml(template, {
       ...sample,
       projects: [{ name: 'Literal', bullets: ['Uses {{DESC}} syntax', 'Also {{DESC_BLOCK}} here'] }],
     }, TEMPLATE_PATH);
@@ -1064,7 +1179,7 @@ async function runSelfTest() {
   };
   let noLocHtml;
   try {
-    noLocHtml = renderHtml(template, noLocSample, TEMPLATE_PATH);
+    noLocHtml = await renderHtml(template, noLocSample, TEMPLATE_PATH);
   } catch (err) {
     console.error(`Self-test failed (no-location variant): ${err.message}`);
     process.exit(1);
@@ -1087,7 +1202,7 @@ async function runSelfTest() {
   };
   let certHtml;
   try {
-    certHtml = renderHtml(template, noOrgCert, TEMPLATE_PATH);
+    certHtml = await renderHtml(template, noOrgCert, TEMPLATE_PATH);
   } catch (err) {
     console.error(`Self-test failed (cert variant): ${err.message}`);
     process.exit(1);
