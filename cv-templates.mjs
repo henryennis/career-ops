@@ -4,7 +4,7 @@
 // Backward-compatible: with no config and no named files, resolves the base
 // templates/cv-template.html (name "standard"), identical to prior behavior.
 
-import { readdirSync, readFileSync, existsSync, statSync } from 'fs';
+import { readdirSync, readFileSync, existsSync, statSync, realpathSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { loadYaml } from './lib/yaml-document.mjs';
@@ -231,6 +231,35 @@ export function listTemplates(kind, { dir, format = 'html', userDir } = {}) {
   assertFormat(format);
   const user = userDirFor(dir, userDir);
   return [...discover(kind, { dir: dir ?? DEFAULT_TEMPLATES_DIR, format, userDir: user }).values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * The discovered entry whose file is `templatePath`, or null when that path is
+ * not a discovered template — a file handed over by arbitrary path, say.
+ *
+ * Both layers are searched: the checkout's templates/ and the data root's
+ * data/templates. Paths are compared canonically, so a symlinked spelling still
+ * matches. build-cv-html.mjs asks this before running a pack's renderer: code
+ * beside a template runs only when discovery, not the command line, vouches
+ * for where the template lives.
+ */
+export function findTemplateEntry(kind, templatePath, { format = 'html' } = {}) {
+  const cfg = KINDS[kind];
+  if (!cfg) throw new Error(`Unknown template kind: ${kind}`);
+  assertFormat(format);
+  const canonical = (path) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return resolve(path);
+    }
+  };
+  const wanted = canonical(templatePath);
+  const found = discover(kind, { dir: DEFAULT_TEMPLATES_DIR, format, userDir: DEFAULT_USER_TEMPLATES_DIR() });
+  for (const entry of found.values()) {
+    if (canonical(entry.path) === wanted) return entry;
+  }
+  return null;
 }
 
 export function validateTemplate(path, kind) {

@@ -94,6 +94,39 @@ sections: all
 
 `sections: all` claims every section; `sections: experience, education` claims a subset. A declared section must exist (checked when the template resolves by name) and must parse with a non-empty `<!--ENTRY-->` zone (checked when the CV renders), or the build fails naming the file — it never falls back. Undeclared sections keep the silent fallback, so a pack written before this key exists behaves exactly as it did; a pack that declares nothing is simply a pack that has not made the claim. Prefer `sections: all` for a pack whose point is its DOM, as the ATS pack does: the alternative is being correct by a coincidence the pack never stated, which the next change to a built-in builder can end without any test noticing.
 
+### Pack renderers
+
+A pack may ship a `render.mjs` beside its template. When it does, `build-cv-html.mjs` validates the payload as usual and then calls the renderer instead of the placeholder fill:
+
+```js
+// <pack>/render.mjs
+export function render({ payload, template, options, helpers }) {
+  return helpers.fillTemplate(template, { SKILLS: mySkillsMarkup(payload, helpers) });
+}
+```
+
+| Argument | What it holds |
+|---|---|
+| `payload` | The validated CV payload (`lib/cv-payload-schema.mjs`), with `candidate.photo` already turned into a data URL |
+| `template` | The text of the pack's `cv-template.<name>.html` |
+| `options` | `templatePath`, `packDirectory`, `lang`, `pageFormat` (`a4` or `letter`), `pageWidth`, `sectionTitles` (defaults merged with `payload.sections`), `candidate`, `partials` (the parsed `sections/` files), `substitutions` (the complete `{{PLACEHOLDER}}` map the fill would apply) |
+| `helpers` | `escapeHtml`, `sanitizeUrl`, `sanitizeImageSrc`, `joinItems`, `fillTemplate(text, overrides)` (the default fill: contact row, photo, empty-section strip, every placeholder, with `overrides` replacing substitutions by key), `buildContactRow`, `buildPhoto`, the eight section builders, and `stripEmptySections(html)` bound to the payload |
+
+It returns the full HTML document, or a promise of one. The build report gains a `renderer` field naming the file.
+
+**What still runs on the output.** Pack fonts are inlined; a `{{PLACEHOLDER}}` left in the document fails the build; the empty-section strip runs by marker. `generate-pdf.mjs` then applies `cv.sections`, checks section order and runs the fact gate on the result as for any CV, and `verify-ats.mjs` reads headings through the `section-title` class. What a renderer keeps decides which guards keep working:
+
+| Renderer keeps | Guards that depend on it | If dropped |
+|---|---|---|
+| The `<!-- WORK EXPERIENCE -->`-style markers and the `<!-- END -->` sentinel | Empty-section strip, `cv.sections` reorder | Those sections are neither stripped nor moved; the document is otherwise untouched |
+| `class="section-title"` on section headings | Section-order guard, ATS heading audit | The guard sees fewer sections and may pass vacuously; the audit reports missing headings |
+| `helpers.escapeHtml` on every payload string it places itself | Markup integrity | Payload text becomes markup; the fill's escaping covers only the strings the fill inserts |
+| Only payload-sourced numbers in visible text | Fact gate (`verify-cv-facts.mjs`) | An invented figure is flagged as an unsupported claim |
+
+**Where it is allowed to run.** Only a pack that `cv-templates.mjs` discovers (a subdirectory of `templates/` here, or of `data/templates/` in the data root) may supply a renderer. A `render.mjs` beside a template handed to the builder by arbitrary path is reported on stderr and ignored, so the template argument cannot be turned into a way to run code from anywhere. Inside that boundary the trust model is the one `plugins/` has: the renderer is the user's own code and runs as the user, with the user's permissions. Cover-letter templates have no renderer hook.
+
+`tests/fixtures/cv-template-packs/renderer-fixture/` is a complete, minimal pack with a renderer; `tests/template-pack-renderer.test.mjs` shows what the guards do around it.
+
 ### resume-template.html
 
 Resume-branded variant of `cv-template.html` for US/industry job applications. Key differences from the CV template:
