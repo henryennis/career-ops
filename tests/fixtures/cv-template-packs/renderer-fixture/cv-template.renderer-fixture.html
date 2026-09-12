@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<!-- career-ops-template
+name: Renderer Fixture
+version: 1.0.0
+-->
+<html lang="{{LANG}}">
+<head>
+<meta charset="UTF-8">
+<title>{{NAME}} — CV</title>
+<style>
+  /* A deliberately small template: enough structure for the section markers,
+     the .section-title class the guards read, and the contact row the builder
+     rebuilds. Its render.mjs redoes the Skills section only. */
+  :root {
+    --font-family: "Liberation Sans", Arial, sans-serif;
+    --font-size: 10.5px;
+    --page-margin: 0.6in;
+  }
+  @page { margin: var(--page-margin); }
+  * {
+    font-variant-ligatures: none;
+    font-feature-settings: "liga" 0, "clig" 0, "dlig" 0;
+  }
+  body { font-family: var(--font-family); font-size: var(--font-size); }
+  .page { max-width: {{PAGE_WIDTH}}; margin: 0 auto; }
+  .section-title { font-weight: 700; text-transform: uppercase; }
+  .evidence-bar { display: inline-block; height: 6px; background: currentColor; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- HEADER -->
+  <div class="header">
+    {{PHOTO}}
+    <h1>{{NAME}}</h1>
+    <div class="contact-row">
+      <a href="mailto:{{EMAIL}}">{{EMAIL}}</a>
+      <span class="separator">|</span>
+      <span>{{LOCATION}}</span>
+    </div>
+  </div>
+
+  <!-- PROFESSIONAL SUMMARY -->
+  <div class="section">
+    <div class="section-title">{{SECTION_SUMMARY}}</div>
+    <div class="summary-text">{{SUMMARY_TEXT}}</div>
+  </div>
+
+  <!-- CORE COMPETENCIES -->
+  <div class="section">
+    <div class="section-title">{{SECTION_COMPETENCIES}}</div>
+    <div class="competencies">{{COMPETENCIES}}</div>
+  </div>
+
+  <!-- WORK EXPERIENCE -->
+  <div class="section">
+    <div class="section-title">{{SECTION_EXPERIENCE}}</div>
+    {{EXPERIENCE}}
+  </div>
+
+  <!-- PROJECTS -->
+  <div class="section">
+    <div class="section-title">{{SECTION_PROJECTS}}</div>
+    {{PROJECTS}}
+  </div>
+
+  <!-- EDUCATION -->
+  <div class="section">
+    <div class="section-title">{{SECTION_EDUCATION}}</div>
+    {{EDUCATION}}
+  </div>
+
+  <!-- CERTIFICATIONS -->
+  <div class="section">
+    <div class="section-title">{{SECTION_CERTIFICATIONS}}</div>
+    {{CERTIFICATIONS}}
+  </div>
+
+  <!-- AWARDS -->
+  <div class="section">
+    <div class="section-title">{{SECTION_AWARDS}}</div>
+    {{AWARDS}}
+  </div>
+
+  <!-- INTERESTS -->
+  <div class="section">
+    <div class="section-title">{{SECTION_INTERESTS}}</div>
+    <div class="interests">{{INTERESTS}}</div>
+  </div>
+
+  <!-- SKILLS -->
+  <div class="section">
+    <div class="section-title">{{SECTION_SKILLS}}</div>
+    {{SKILLS}}
+  </div>
+
+  <!-- END -->
+
+</div>
+</body>
+</html>
