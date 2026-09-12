@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<!-- career-ops-template
+name: Evidence Sidebar
+version: 1.0.0
+-->
+<html lang="{{LANG}}">
+<head>
+<meta charset="UTF-8">
+<title>{{NAME}} CV</title>
+<style>
+  /* Evidence Sidebar (fork/cv-template-kit/packs/evidence-sidebar)
+
+     The narrative runs down the left; a tinted rail on the right holds the
+     contact details and a Skills list whose bars render.mjs sizes from how
+     often the summary, the bullets and the projects on this page mention
+     each skill. A skill nothing on the page backs is listed in grey with an
+     empty track, which tells the author as much as the reader.
+
+     Document order is main column first, rail second, so a PDF text
+     extractor reads the story before the skills and the section-order guard
+     in generate-pdf.mjs sees the canonical order. CSS places the rail.
+
+     ATS discipline as in the shipped templates: system font stack, ligatures
+     off, no tables, no CSS columns. The grid is still a two-column page; the
+     README states that trade-off. */
+
+  :root {
+    --accent-color: #0f4c5c;
+    --secondary-color: #1f2933;
+    --font-family: "Liberation Sans", "Helvetica Neue", Arial, "DejaVu Sans", sans-serif;
+    --font-size: 10.5px;
+    --page-margin: 0.55in;
+    --rail-width: 58mm;
+    --rail-tint: #f1f5f4;
+    --rule: #d7dee0;
+    --muted: #5b6770;
+  }
+  @page { margin: var(--page-margin); }
+
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-variant-ligatures: none;
+    font-feature-settings: "liga" 0, "clig" 0, "dlig" 0;
+  }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    font-family: var(--font-family);
+    font-size: var(--font-size);
+    line-height: 1.5;
+    color: var(--secondary-color);
+    background: #ffffff;
+  }
+  .page { max-width: {{PAGE_WIDTH}}; margin: 0 auto; }
+
+  /* Masthead: name only; contact details live in the rail. */
+  .masthead {
+    display: flex;
+    align-items: flex-end;
+    gap: 14px;
+    padding-bottom: 9px;
+    border-bottom: 2px solid var(--accent-color);
+    margin-bottom: 14px;
+  }
+  .masthead h1 {
+    font-size: 27px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    color: var(--accent-color);
+  }
+  .cv-photo { width: 62px; height: 62px; object-fit: cover; }
+  .cv-photo--rounded { border-radius: 8px; }
+  .cv-photo--circle { border-radius: 50%; }
+  .cv-photo--square { border-radius: 0; }
+
+  .columns {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) var(--rail-width);
+    column-gap: 9mm;
+    align-items: start;
+  }
+  .main { min-width: 0; }
+  .rail {
+    background: var(--rail-tint);
+    padding: 10px 11px 12px;
+    border-top: 3px solid var(--accent-color);
+  }
+
+  .section { margin-bottom: 13px; }
+  .section-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent-color);
+    padding-bottom: 3px;
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: 7px;
+  }
+  .rail .section-title { border-bottom-color: rgba(0, 0, 0, 0.08); }
+
+  .summary-text { line-height: 1.6; }
+  .summary-text strong, .job li strong { font-weight: 700; }
+
+  .competencies { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+  .competency-tag {
+    font-size: 9.5px;
+    padding: 2px 8px;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+  }
+
+  .job { margin-bottom: 10px; break-inside: avoid; }
+  .job-role { font-weight: 700; font-size: 11.5px; }
+  .job-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 9.8px;
+    margin-bottom: 3px;
+  }
+  .job-company { font-weight: 600; color: var(--secondary-color); }
+  .job-location { font-weight: 400; color: var(--muted); }
+  .job-period { white-space: nowrap; }
+  .job ul { padding-left: 14px; margin-top: 2px; }
+  .job li { margin-bottom: 2px; line-height: 1.45; }
+
+  .project { margin-bottom: 7px; break-inside: avoid; }
+  .project-title { font-weight: 700; }
+  .project-title a { color: inherit; text-decoration: none; }
+  .project-badge { font-size: 9px; color: var(--muted); margin-left: 6px; font-weight: 400; }
+  .project-desc { line-height: 1.45; }
+  .project-tech { font-size: 9.5px; color: var(--muted); margin-top: 1px; }
+
+  .edu-item, .cert-item, .award-item { margin-bottom: 5px; break-inside: avoid; }
+  .edu-header { display: flex; justify-content: space-between; gap: 8px; }
+  .edu-title { font-weight: 700; }
+  .edu-org { font-weight: 400; color: var(--muted); }
+  .edu-year, .cert-year, .award-year { color: var(--muted); font-size: 9.8px; white-space: nowrap; }
+  .edu-location, .edu-desc { font-size: 9.8px; color: var(--muted); }
+  .cert-item, .award-item { display: flex; justify-content: space-between; gap: 8px; }
+  .cert-org, .award-org { color: var(--muted); }
+
+  .contact { margin-bottom: 12px; font-size: 9.8px; }
+  .contact-row { display: flex; flex-direction: column; gap: 2px; }
+  .contact-row a { color: var(--secondary-color); text-decoration: none; overflow-wrap: anywhere; }
+  .contact-row .separator { display: none; }
+
+  /* Skills, as render.mjs emits them. */
+  .skill-group { margin-bottom: 8px; }
+  .skill-category {
+    font-size: 9.2px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin-bottom: 3px;
+  }
+  .skill {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 18mm;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 2px;
+    font-size: 9.8px;
+  }
+  .skill-name { min-width: 0; overflow-wrap: anywhere; }
+  /* Both blocks on purpose: a span is inline by default, and an inline fill
+     has no width to size, so every bar would show its grey track alone. */
+  .evidence-track { display: block; height: 5px; background: rgba(0, 0, 0, 0.08); border-radius: 3px; overflow: hidden; }
+  .evidence-fill { display: block; height: 100%; background: var(--accent-color); border-radius: 3px; }
+  .skill--unbacked .skill-name { color: var(--muted); }
+  .evidence-legend { font-size: 8.5px; color: var(--muted); margin-top: 6px; line-height: 1.35; }
+
+  .section-title, .job-role, .project-title, .edu-title { break-after: avoid; }
+
+  html[lang="ar"] body { direction: rtl; text-align: right; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- HEADER -->
+  <header class="masthead">
+    {{PHOTO}}
+    <h1>{{NAME}}</h1>
+  </header>
+
+  <div class="columns">
+  <main class="main">
+
+  <!-- PROFESSIONAL SUMMARY -->
+  <section class="section">
+    <div class="section-title">{{SECTION_SUMMARY}}</div>
+    <div class="summary-text">{{SUMMARY_TEXT}}</div>
+  </section>
+
+  <!-- CORE COMPETENCIES -->
+  <section class="section">
+    <div class="section-title">{{SECTION_COMPETENCIES}}</div>
+    <div class="competencies">
+      {{COMPETENCIES}}
+    </div>
+  </section>
+
+  <!-- WORK EXPERIENCE -->
+  <section class="section">
+    <div class="section-title">{{SECTION_EXPERIENCE}}</div>
+    {{EXPERIENCE}}
+  </section>
+
+  <!-- PROJECTS -->
+  <section class="section">
+    <div class="section-title">{{SECTION_PROJECTS}}</div>
+    {{PROJECTS}}
+  </section>
+
+  <!-- EDUCATION -->
+  <section class="section">
+    <div class="section-title">{{SECTION_EDUCATION}}</div>
+    {{EDUCATION}}
+  </section>
+
+  <!-- CERTIFICATIONS -->
+  <section class="section">
+    <div class="section-title">{{SECTION_CERTIFICATIONS}}</div>
+    {{CERTIFICATIONS}}
+  </section>
+
+  <!-- AWARDS -->
+  <section class="section">
+    <div class="section-title">{{SECTION_AWARDS}}</div>
+    {{AWARDS}}
+  </section>
+
+  <!-- INTERESTS -->
+  <section class="section">
+    <div class="section-title">{{SECTION_INTERESTS}}</div>
+    <div class="interests">{{INTERESTS}}</div>
+  </section>
+
+  <!-- END MAIN -->
+  </main>
+
+  <aside class="rail">
+    <div class="contact">
+      <div class="contact-row">
+        <a href="tel:{{PHONE}}">{{PHONE}}</a>
+        <span class="separator">|</span>
+        <a href="mailto:{{EMAIL}}">{{EMAIL}}</a>
+        <span class="separator">|</span>
+        <a href="{{LINKEDIN_URL}}">{{LINKEDIN_DISPLAY}}</a>
+        <span class="separator">|</span>
+        <a href="{{PORTFOLIO_URL}}">{{PORTFOLIO_DISPLAY}}</a>
+        <span class="separator">|</span>
+        <span>{{LOCATION}}</span>
+      </div>
+    </div>
+
+  <!-- SKILLS -->
+  <section class="section section--skills">
+    <div class="section-title">{{SECTION_SKILLS}}</div>
+    {{SKILLS}}
+  </section>
+
+  <!-- END -->
+  </aside>
+  </div>
+
+</div>
+</body>
+</html>
