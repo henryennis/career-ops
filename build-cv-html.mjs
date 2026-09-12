@@ -31,11 +31,18 @@
 //   never falls back: a missing, malformed, or empty partial fails the render
 //   with the file named. Templates that declare nothing keep the silent
 //   fallback above.
+//
+// Pack renderers:
+//   A template pack may also ship a render.mjs beside its template file. Its
+//   `render` function then produces the document instead of the placeholder
+//   fill, from the validated payload plus this builder's own helpers — see
+//   "Pack renderers" below and templates/README.md. It is loaded only for a
+//   template cv-templates.mjs discovers as a pack, never from an arbitrary path.
 
 import { readFile, writeFile, stat, mkdir } from 'fs/promises';
 import { existsSync, readFileSync, realpathSync } from 'fs';
-import { resolve, dirname, basename, join, extname, isAbsolute } from 'path';
-import { fileURLToPath } from 'url';
+import { resolve, dirname, basename, join, extname, isAbsolute, relative } from 'path';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { tmpdir } from 'os';
 import { loadYaml } from './lib/yaml-document.mjs';
 import { stripEmptySections } from './cv-sections-core.mjs';
@@ -65,6 +72,11 @@ const PHOTO_MIME_BY_EXT = new Map([
 ]);
 const PHOTO_STYLES = new Set(['rounded', 'circle', 'square']);
 const IMAGE_DATA_URL_RE = /^data:image\/(?:png|jpeg|webp|gif);base64,[a-z0-9+/=\s]+$/i;
+
+const PACK_RENDERER_FILE = 'render.mjs';
+// The same reference form generate-pdf.mjs inlines for the repo-level fonts/.
+const PACK_FONT_REF_RE = /url\(\s*(['"]?)\.\/fonts\/([^'")\s]+)\1\s*\)/g;
+const FONT_MIME = { woff2: 'font/woff2', woff: 'font/woff', otf: 'font/otf', ttf: 'font/ttf' };
 
 const DEFAULT_SECTION_TITLES = {
   summary: 'Professional Summary',
@@ -814,7 +826,7 @@ function renderReport(payload, partials) {
     SKILLS: buildSkills(payload.skills, partials.get('skills')),
     CONSENT: escapeHtml((payload.consent || '').trim()),
   };
-  return { substitutions, candidate };
+  return { substitutions, candidate, sectionTitles, pageWidth };
 }
 
 function checkTemplateTokens(source, isResolved = () => false) {
@@ -827,15 +839,142 @@ function checkTemplateTokens(source, isResolved = () => false) {
   }
 }
 
+// ── Pack renderers ──────────────────────────────────────────────────────────
+//
+// A template pack may ship a render.mjs beside its template file:
+//
+//   export async function render({ payload, template, options, helpers }) {
+//     return helpers.fillTemplate(template, { SKILLS: myOwnSkillsMarkup });
+//   }
+//
+// `payload` is the validated payload (candidate photo already prepared),
+// `template` the template text, `options` what this builder resolved on the
+// way in (templatePath, packDirectory, lang, pageFormat, pageWidth,
+// sectionTitles, candidate, the pack's partials, and `substitutions`, the
+// complete {{PLACEHOLDER}} map the default fill would apply), and `helpers` the
+// builder's own functions: escapeHtml, sanitizeUrl, sanitizeImageSrc,
+// joinItems, the section builders, buildContactRow, buildPhoto, buildTitle,
+// stripEmptySections (bound to this payload), and fillTemplate, which is the
+// default fill itself (renderHtml with `overrides` for the placeholders the
+// renderer computes), so a renderer can keep it for the parts it does not
+// redo. It returns the full HTML document (a Promise of one is fine).
+//
+// What still runs on the renderer's output, and what it means for the guards:
+//   - pack fonts are inlined and any leftover {{PLACEHOLDER}} fails the build,
+//     exactly as for a template;
+//   - stripEmptySections runs by marker, so a renderer that keeps the
+//     `<!-- WORK EXPERIENCE -->`-style markers and the `<!-- END -->` sentinel
+//     gets empty sections dropped for free, and one that drops a marker gets
+//     the documented fail-safe (that section stays, header and all);
+//   - generate-pdf.mjs then applies `cv.sections` from the profile by the same
+//     markers, checks section order and ATS headings by the `.section-title`
+//     class, and runs the fact gate over the visible text. Keep the markers
+//     and the class and every guard keeps working.
+//
+// The renderer is loaded only for a template cv-templates.mjs discovers as a
+// pack (templates/<dir>/ in the code tree, or data/templates/<dir>/ in the data
+// root). A render.mjs beside a template handed over by arbitrary path is
+// reported and ignored: running code from wherever a command-line argument
+// points would turn the template argument into an execution vector, and
+// discovery is a boundary the user already controls. Inside it the trust model
+// is the one plugins/ has: a renderer is the user's own code and runs as the
+// user. cv-templates.mjs is imported only when a render.mjs is present, so the
+// placeholder path keeps this module's import graph as it was.
+async function loadPackRenderer(templatePath) {
+  const rendererPath = join(dirname(templatePath), PACK_RENDERER_FILE);
+  if (!existsSync(rendererPath)) return null;
+  const { findTemplateEntry } = await import('./cv-templates.mjs');
+  const entry = findTemplateEntry('cv', templatePath);
+  if (!entry || !entry.pack) {
+    console.error(`Warning: ${rendererPath} ignored — ${templatePath} is not a discovered template pack, so its renderer does not run`);
+    return null;
+  }
+  const module = await import(pathToFileURL(rendererPath).href);
+  if (typeof module.render !== 'function') {
+    throw new Error(`${rendererPath} must export a render function`);
+  }
+  return { path: rendererPath, render: module.render };
+}
+
+// Inline the fonts a pack keeps beside its template. url('./fonts/<file>') is
+// the form the shipped templates use for the repo-level fonts/ directory, which
+// generate-pdf.mjs inlines at render time relative to the code tree. A pack
+// outside the code tree cannot reach that directory, and a relative reference
+// in the built HTML would resolve against wherever the HTML is written, so a
+// pack's own fonts/ is resolved here, while the template path is still known.
+// A reference with no matching pack file is left for generate-pdf.mjs, so a
+// template with no fonts/ beside it comes out byte-identical.
+function inlinePackFonts(html, templatePath) {
+  const fontsDir = join(dirname(templatePath), 'fonts');
+  if (!existsSync(fontsDir)) return html;
+  const encoded = new Map();
+  return html.replace(PACK_FONT_REF_RE, (match, _quote, name) => {
+    if (!encoded.has(name)) {
+      const fontPath = resolve(fontsDir, name);
+      const inside = relative(fontsDir, fontPath);
+      let dataUrl = null;
+      if (!inside.startsWith('..') && !isAbsolute(inside) && existsSync(fontPath)) {
+        const mime = FONT_MIME[extname(name).slice(1).toLowerCase()] || 'application/octet-stream';
+        dataUrl = `url('data:${mime};base64,${readFileSync(fontPath).toString('base64')}')`;
+      }
+      encoded.set(name, dataUrl);
+    }
+    return encoded.get(name) || match;
+  });
+}
+
+// Produce the document through a pack renderer from loadPackRenderer(). The
+// payload was validated before this runs; the empty-section strip and the
+// unresolved-placeholder check run on what the renderer returns.
+async function renderWithPack(renderer, template, payload, templatePath) {
+  const partials = loadSectionPartials(templatePath);
+  const { substitutions, candidate, sectionTitles, pageWidth } = renderReport(payload, partials);
+  substitutions.PHOTO = buildPhoto(candidate, candidate.name);
+  let html = await renderer.render({
+    payload,
+    template,
+    options: {
+      templatePath,
+      packDirectory: dirname(templatePath),
+      lang: payload.lang || 'en',
+      pageFormat: resolvePageFormat(payload.page_format, { profilePath: PROFILE_PATH, country: payload.country }),
+      pageWidth,
+      sectionTitles,
+      candidate,
+      partials,
+      substitutions,
+    },
+    helpers: {
+      escapeHtml, sanitizeUrl, sanitizeImageSrc, joinItems,
+      fillTemplate: (text, overrides = {}) => renderHtml(text, payload, templatePath, overrides),
+      buildContactRow, buildPhoto, buildTitle, buildCompetencies, buildExperience, buildProjects,
+      buildEducation, buildCertifications, buildAwards, buildInterests, buildSkills,
+      stripEmptySections: (text) => stripEmptySections(text, payload, 'html'),
+    },
+  });
+  if (typeof html !== 'string' || !html.trim()) {
+    throw new Error(`${renderer.path} returned ${typeof html === 'string' ? 'an empty document' : typeof html}; a renderer must return the full HTML document as a string`);
+  }
+  // By marker, on the renderer's output too, so a renderer that keeps the
+  // markers needs no code of its own for empty sections. Idempotent: a renderer
+  // that already went through helpers.fillTemplate loses nothing.
+  html = stripEmptySections(html, payload, 'html');
+  checkTemplateTokens(html);
+  return html;
+}
+
 // Merge a payload into the template and return the final HTML (throws on any
 // unresolved placeholder so a malformed template fails loudly, not silently).
-function renderHtml(template, payload, templatePath) {
+// `overrides` replaces entries of the substitution map; a pack renderer passes
+// the placeholders it computes itself through helpers.fillTemplate.
+function renderHtml(template, payload, templatePath, overrides = {}) {
   // Load section partials from the sections/ directory co-located with the
   // template. Falls back to built-in builders when no partials directory exists.
   const partials = templatePath ? loadSectionPartials(templatePath) : new Map();
 
   const { substitutions, candidate } = renderReport(payload, partials);
   substitutions.PHOTO = buildPhoto(candidate, candidate.name);
+  Object.assign(substitutions, overrides);
 
   // Check the outer template before removing optional sections. The contact
   // row is replaced as a unit, and only a line-leading TITLE_BLOCK is filled.
@@ -1199,14 +1338,25 @@ async function main() {
   for (const message of warnings) console.error(`Warning: ${message}`);
 
   let html;
+  let renderer = null;
   try {
-    html = renderHtml(template, payload, templatePath);
+    renderer = await loadPackRenderer(templatePath);
+    html = renderer
+      ? await renderWithPack(renderer, template, payload, templatePath)
+      : renderHtml(template, payload, templatePath);
+    // A pack's own fonts, when it ships any — see inlinePackFonts.
+    html = inlinePackFonts(html, templatePath);
   } catch (err) {
-    console.error(err.message);
+    // A renderer is the user's own code: when one is in play they are debugging
+    // it, and the stack names the line. The placeholder path keeps the one-line
+    // message it always had.
+    console.error(renderer ? (err.stack || err.message) : err.message);
     process.exit(1);
   }
 
-  await writeAndReport(html, absOutput, payload, preview ? { status: 'preview-ready', warnings } : { warnings });
+  const extra = preview ? { status: 'preview-ready', warnings } : { warnings };
+  if (renderer) extra.renderer = renderer.path;
+  await writeAndReport(html, absOutput, payload, extra);
   process.exit(0);
 }
 
