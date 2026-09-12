@@ -276,6 +276,26 @@ export function listTemplates(kind, { dir, format = 'html' } = {}) {
   return [...discover(kind, { dirs: rootsFor(dir), format }).values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * The discovered entry whose file is `templatePath`, or null when that path is
+ * not a discovered template — a file handed over by arbitrary path, say.
+ *
+ * Paths are compared canonically, so a symlinked spelling still matches.
+ * build-cv-html.mjs asks this before running a pack's renderer: code beside a
+ * template runs only when discovery, not the command line, vouches for where
+ * the template lives.
+ */
+export function findTemplateEntry(kind, templatePath, { format = 'html' } = {}) {
+  const cfg = KINDS[kind];
+  if (!cfg) throw new Error(`Unknown template kind: ${kind}`);
+  assertFormat(format);
+  const wanted = canonicalPath(templatePath);
+  for (const entry of discover(kind, { dirs: templateRoots(), format }).values()) {
+    if (canonicalPath(entry.path) === wanted) return entry;
+  }
+  return null;
+}
+
 export function validateTemplate(path, kind) {
   const cfg = KINDS[kind];
   if (!cfg) throw new Error(`Unknown template kind: ${kind}`);
