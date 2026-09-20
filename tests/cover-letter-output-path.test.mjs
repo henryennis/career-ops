@@ -12,10 +12,15 @@
 import { resolve, join, relative, isAbsolute } from 'path';
 import { pass, fail, ROOT } from './helpers.mjs';
 import { safeOutputPath } from '../generate-cover-letter.mjs';
+import { getCareerOpsRoot } from '../path-resolver.mjs';
 
 console.log('\nCover letter --out preserves output/ subdirectories (#2940)');
 
-const OUTPUT_ROOT = resolve(ROOT, 'output');
+// The data root, not the repo root. The module resolves the letter there so its
+// destination agrees with the render guard and with every other read; anchoring
+// this expectation to the checkout asserted the disagreement that made the two
+// guards unsatisfiable for anyone whose personal files live outside it.
+const OUTPUT_ROOT = resolve(getCareerOpsRoot(), 'output');
 
 function underOutput(absPath) {
   const rel = relative(OUTPUT_ROOT, absPath);

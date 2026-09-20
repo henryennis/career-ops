@@ -21,9 +21,22 @@ import { parseArgs } from "util";
 import { assertFacts } from "./verify-cv-facts.mjs";
 import { resolveTemplate } from "./cv-templates.mjs";
 import { isMainModule } from "./lib/is-main-module.mjs";
+import { getCareerOpsRoot } from "./path-resolver.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const OUTPUT_ROOT = resolve(__dirname, "output");
+
+// Anchored to the data root, as every other read and the render guard in
+// generate-pdf.mjs already are. Anchored to the install directory it disagreed
+// with them for anyone whose personal files live outside the checkout, the
+// layout the .career-ops-data marker exists for: this module resolved the
+// letter into the install directory's output/, and the render step then refused
+// that same path as outside the tracker workspace. Neither an absolute path nor
+// a relative one could satisfy both guards, so no cover letter could be written
+// at all. Re-derived per call rather than frozen at import, so a change of root
+// mid-process is picked up.
+function outputRoot() {
+  return resolve(getCareerOpsRoot(), "output");
+}
 
 /**
  * Resolve a requested cover-letter output path.
@@ -34,7 +47,7 @@ const OUTPUT_ROOT = resolve(__dirname, "output");
  * are rejected instead of being silently flattened to `output/<basename>`.
  *
  * @param {string} raw - Caller-supplied --out / payload.output_path value.
- * @returns {string} Absolute path inside OUTPUT_ROOT.
+ * @returns {string} Absolute path inside the data root's output/.
  */
 export function safeOutputPath(raw) {
   if (raw == null || String(raw).trim() === "") {
@@ -59,15 +72,15 @@ export function safeOutputPath(raw) {
     : posix.startsWith("output/")
       ? posix.slice("output/".length)
       : posix;
-  const candidate = resolve(OUTPUT_ROOT, relativeToRoot);
+  const candidate = resolve(outputRoot(), relativeToRoot);
   if (containedInOutput(candidate)) return candidate;
 
   throw new Error(`Refusing to write the cover letter outside output/: ${raw}`);
 }
 
-/** True when absPath is a file (not output/ itself) still inside OUTPUT_ROOT. */
+/** True when absPath is a file (not output/ itself) still inside the output root. */
 function containedInOutput(absPath) {
-  const rel = relative(OUTPUT_ROOT, absPath);
+  const rel = relative(outputRoot(), absPath);
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
@@ -307,7 +320,7 @@ Usage:
   if (!payload.output_path) {
     const company = (payload.letter?.company || "company").toLowerCase().replace(/[^a-z0-9]+/g, "-");
     const role    = (payload.letter?.role_title || "role").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30);
-    payload.output_path = join(OUTPUT_ROOT, `${company}-${role}-cover.pdf`);
+    payload.output_path = join(outputRoot(), `${company}-${role}-cover.pdf`);
   } else {
     try {
       payload.output_path = safeOutputPath(payload.output_path);
@@ -317,7 +330,7 @@ Usage:
     }
   }
 
-  if (!existsSync(OUTPUT_ROOT)) mkdirSync(OUTPUT_ROOT, { recursive: true });
+  if (!existsSync(outputRoot())) mkdirSync(outputRoot(), { recursive: true });
 
   try {
     const html = buildHtml(payload);
