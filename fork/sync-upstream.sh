@@ -34,11 +34,13 @@ upstream_head="$UPSTREAM_REMOTE/$MIRROR_BRANCH"
 
 fail() { printf 'sync: %s\n' "$*" >&2; exit 1; }
 rebase_output="$(mktemp)"
-data_root_marker=".career-ops-data"
-marker_set_aside=""
+tests_worktree=""
 cleanup() {
   rm -f "$rebase_output"
-  if [ -n "$marker_set_aside" ] && [ -e "$marker_set_aside" ]; then mv -f "$marker_set_aside" "$data_root_marker"; fi
+  if [ -n "$tests_worktree" ] && [ -d "$tests_worktree" ]; then
+    git worktree remove --force "$tests_worktree" >/dev/null 2>&1 || rm -rf "$tests_worktree"
+    git worktree prune >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 step() { printf '\n== %s\n' "$*"; }
@@ -140,18 +142,22 @@ dropped="$(comm -23 <(printf '%s\n' "$subjects_before" | grep . | sort) <(printf
 step "lint (node --check on every script)"
 npm run --silent lint
 if [ "$RUN_TESTS" = 1 ]; then
-  step "tests: node test-all.mjs --quick"
-  # Upstream's suite asserts the default data-root resolution and reads user
-  # files from the checkout, so the marker that points at the real data root
-  # is set aside for the duration of the run and restored on exit.
-  if [ -e "$data_root_marker" ]; then
-    marker_set_aside="$git_directory/career-ops-data.set-aside-by-sync"
-    mv "$data_root_marker" "$marker_set_aside"
-    echo "data root marker set aside during the tests (restored when the script exits)"
-  fi
-  node test-all.mjs --quick \
-    || fail "tests failed on the rebased stack. $STACK_BRANCH is rebased locally and NOT pushed. Fix the patch (git rebase -i $MIRROR_BRANCH), then rerun."
-  if [ -n "$marker_set_aside" ]; then mv -f "$marker_set_aside" "$data_root_marker"; marker_set_aside=""; fi
+  step "tests: node test-all.mjs --quick (in a throwaway copy)"
+  # The suite runs in a detached worktree of the rebased stack, never in this
+  # checkout. Two of upstream's own tests write the tracker and the follow-up
+  # file at their real paths and restore them afterwards (tests/stats.test.mjs,
+  # tests/plugin-run-isolation-and-gmail-dryrun.test.mjs); a run that is
+  # interrupted never reaches the restore, which would leave fixture rows in
+  # the user's tracker. A copy also gives the suite the default data-root
+  # resolution it asserts, whether or not this checkout holds user files.
+  tests_worktree="$(mktemp -d "${TMPDIR:-/tmp}/career-ops-sync-tests.XXXXXX")"
+  rm -rf "$tests_worktree"
+  git worktree add --detach "$tests_worktree" HEAD >/dev/null \
+    || fail "could not create the test worktree at $tests_worktree"
+  ln -s "$repository_root/node_modules" "$tests_worktree/node_modules"
+  ln -s ../fork/local-paths.txt "$tests_worktree/config/local-paths.txt"
+  ( cd "$tests_worktree" && node test-all.mjs --quick ) \
+    || fail "tests failed on the rebased stack. $STACK_BRANCH is rebased locally and NOT pushed. Fix the patch (git rebase -i $MIRROR_BRANCH), then rerun." 
 else
   echo "tests skipped (--skip-tests)"
 fi
@@ -168,4 +174,7 @@ else
 fi
 
 step "state"
-exec "$repository_root/fork/status.sh"
+# Not `exec`: that replaces this shell, and the EXIT trap that removes the
+# test worktree would never run, leaving a full copy of the repository in
+# the temp directory after every successful sync.
+"$repository_root/fork/status.sh"
