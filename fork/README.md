@@ -72,7 +72,7 @@ This is the vendor-branch pattern: one branch is a pristine copy of the vendor's
 1. Fetches `upstream`.
 2. Fast-forwards `main` to `upstream/main`. Refuses if `main` has grown commits of its own.
 3. Rebases `patched` onto `main`. rerere ("reuse recorded resolution", `git config rerere.enabled`) replays any conflict you resolved on an earlier sync, and the script continues past those on its own. A patch that comes out empty, because upstream took the same change, is dropped and named in the output.
-4. Runs `npm run lint` (`node --check` on every script) and `node test-all.mjs --quick` (upstream's full suite minus the dashboard build: about 8700 checks, two and a half minutes on this machine). The data-root marker is set aside for this step and restored afterwards: upstream's suite asserts the default root resolution and expects to read user files from the checkout, and with the marker in place nine of its checks fail.
+4. Runs `npm run lint` (`node --check` on every script), then `node test-all.mjs --quick` (upstream's full suite minus the dashboard build: about 8800 checks, two and a half minutes on this machine) inside a detached worktree of the rebased stack, which it deletes afterwards. Two reasons the suite does not run in the checkout. Upstream's tests assert the default data-root resolution, which a copy gives them whatever this checkout holds. And two of them (`tests/stats.test.mjs`, `tests/plugin-run-isolation-and-gmail-dryrun.test.mjs`) write the tracker, the follow-up file and a plugin state file at their real paths before restoring them, so an interrupted run would leave fixture rows in a tracker that lives here.
 5. Pushes `main` (fast-forward) and `patched` (`--force-with-lease`) to the fork.
 6. Prints `fork/status.sh`.
 
