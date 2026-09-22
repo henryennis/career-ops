@@ -99,6 +99,7 @@ import {
   rebuildRow, resolveTrackerPath, writeFileAtomic, loadCanonicalStates, resolveCanonicalState,
   normalizeCompany, cell, CLI_EXIT, makeCliFailWith, acquireTrackerLockForCli,
 } from './tracker-utils.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 const STATES_FILE = join(CAREER_OPS, 'templates/states.yml');
@@ -325,7 +326,10 @@ if (!newStatus) {
 
 // ── tracker access ───────────────────────────────────────────────
 
-const APPS_FILE = resolveTrackerPath(CAREER_OPS);
+// The tracker is user data, so it resolves against the data root like every
+// other reader of it (merge-tracker.mjs, generate-pdf.mjs). CAREER_OPS stays the
+// install directory on purpose: templates/states.yml ships with the code.
+const APPS_FILE = resolveTrackerPath(getCareerOpsRoot());
 if (!existsSync(APPS_FILE)) {
   failWith(EXIT_NOT_FOUND, 'no-tracker', `No tracker found at ${APPS_FILE}`);
 }
