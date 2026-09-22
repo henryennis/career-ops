@@ -44,6 +44,31 @@ Every run also judges the parked entries again. One the current rules now accept
 
 A second apply under unchanged rules changes nothing, writes no backup, and appends nothing to the log.
 
+## The review lane
+
+Some rows pass every filter and still should not reach an evaluation unread. The usual case is a title with no level word at all: "Software Engineer", "AI Solutions Engineer". `classify-tier.mjs` files those as mid-level by default, so `skip_tiers: [mid]` deletes roles worth a look, and leaving mid in lets every unlabelled title into Pending. The review lane is the third bucket between those two: a person decides.
+
+It is off until `portals.yml` turns it on, under a key scan ignores and upstream's validator accepts:
+
+```yaml
+review_lane:
+  unlabelled_level: true   # the title carries no seniority word the classifier knows
+  tiers: [mid]             # or: the title classifies into one of these tiers
+```
+
+A filter's rejection always wins, so a tier in both `skip_tiers` and `review_lane.tiers` is skipped. Rows the lane claims move to `## Review` (`## Revisar` in a Spanish-headed file), right after Pending, in the same parked form as Refiltered rows: `- [x]`, so nothing evaluates them, and still seen by scan, so a rescan does not add them again. Every run judges them again. A row the lane no longer claims goes back to Pending byte for byte; a row a filter now rejects moves to Refiltered and keeps the date it first left Pending. A move into Review is not a discard and is not logged.
+
+The decision on a Review row belongs to the user, one row at a time, by URL:
+
+```bash
+node fork/refilter.mjs --accept <url> --apply    # to the end of Pending, note stamped "reviewed {date}"
+node fork/refilter.mjs --dismiss <url> --apply   # to Refiltered as dismissed_in_review, logged as a discard
+```
+
+The stamp keeps an accepted row in Pending on later runs while the filters still pass it. A dismissed row stays parked whatever the rules later say. Without `--apply` either command is a dry run.
+
+When a run moves rows to Review, list them with their URLs (the report prints both) and ask the user which to accept and which to dismiss. Never decide for them: the lane exists because a rule could not.
+
 ## Workflow
 
 1. Run the dry run and show the result:
@@ -72,7 +97,8 @@ A second apply under unchanged rules changes nothing, writes no backup, and appe
 - After adding or removing a company in `data/blacklist.md`.
 - After `fork/sync-upstream.sh` brought a change to a matcher (`title-keywords.mjs`, `classify-tier.mjs`, the location or posting-age builders in `scan.mjs`): the rules are the same, the verdicts may not be.
 - Before a long `/career-ops pipeline` or batch run over an inbox that has been accumulating for weeks.
+- After a scan, when `review_lane` is on: new rows land in Pending, and the refilter sorts the ones the lane claims into Review before anything evaluates them.
 
 ## What this mode never does
 
-It never opens a posting, extracts a job description, evaluates, writes a report or a PDF, edits the tracker, or submits anything. It never rescans; new offers still come from `/career-ops scan`. It never touches Processed, error rows, expired entries, or bare URLs. When the user disagrees with a verdict, the fix is the rule (edit `portals.yml` or the blacklist and run again). Moving the one row back to Pending by hand as `- [ ]` also works, annotation or not: the next run clears a stale annotation from a row the rules accept, and parks the row again, with a single fresh annotation, if they still reject it.
+It never opens a posting, extracts a job description, evaluates, writes a report or a PDF, edits the tracker, or submits anything. It never accepts or dismisses a Review row the user did not name. It never rescans; new offers still come from `/career-ops scan`. It never touches Processed, error rows, expired entries, or bare URLs. When the user disagrees with a verdict, the fix is the rule (edit `portals.yml` or the blacklist and run again). Moving the one row back to Pending by hand as `- [ ]` also works, annotation or not: the next run clears a stale annotation from a row the rules accept, and parks the row again, with a single fresh annotation, if they still reject it.

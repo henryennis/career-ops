@@ -36,11 +36,30 @@
  * body is kept byte for byte so the row can return: when a later run finds the
  * current rules accept a parked row, it goes back to Pending as `- [ ] {body}`.
  *
+ * The review lane is a second section the script owns, `## Review` (`## Revisar`),
+ * for rows every filter above accepts but a person should see before anything
+ * spends an evaluation on them. portals.yml says which, under a key scan.mjs
+ * ignores:
+ *
+ *   review_lane:
+ *     unlabelled_level: true   # the title carries no seniority word at all
+ *     tiers: [mid]             # the title classifies into one of these tiers
+ *
+ * Review rows use the same parked form as Refiltered ones, so they are just as
+ * invisible to evaluation and just as visible to scan's dedup, and every run
+ * judges them again: back to Pending when the lane no longer claims them, into
+ * Refiltered when a filter now rejects them. A person decides the rest:
+ * --accept sends a row to Pending with a `reviewed {date}` stamp in its note, so
+ * later runs leave it there; --dismiss parks it in Refiltered under
+ * `dismissed_in_review`, which no later run restores.
+ *
  * Usage:
  *   node fork/refilter.mjs                 # dry run: report only, nothing written
  *   node fork/refilter.mjs --apply         # write the inbox (backup first), append the discard log
  *   node fork/refilter.mjs --json          # one JSON object on stdout, nothing else
  *   node fork/refilter.mjs --pipeline <path> --portals <path>
+ *   node fork/refilter.mjs --accept <url> [--apply]   # a Review row goes to Pending
+ *   node fork/refilter.mjs --dismiss <url> [--apply]  # a Review row is parked for good
  */
 
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
@@ -54,6 +73,7 @@ import {
   buildLocationFilter,
   buildPostingAgeFilter,
   loadBlacklist,
+  normalizeUrlForDedup,
 } from '../scan.mjs';
 import { buildTitleFilter } from '../title-keywords.mjs';
 import { classifyTier } from '../classify-tier.mjs';
@@ -78,6 +98,7 @@ export const DEFAULT_DISCARD_LOG_PATH = path.join(DATA_ROOT, 'data/discard.log')
 export const SECTION_HEADER_RE = /^##\s+/;
 export const PENDING_HEADER_RE = /^##\s+(?:Pending|Pendientes)\s*$/i;
 export const REFILTERED_HEADER_RE = /^##\s+(?:Refiltered|Refiltradas)\s*$/i;
+export const REVIEW_HEADER_RE = /^##\s+(?:Review|Revisar)\s*$/i;
 export const PROCESSED_HEADER_RE = /^##\s+(?:Processed|Procesadas)\s*$/i;
 
 const PENDING_ROW_RE = /^- \[ \] (.*)$/;
@@ -100,6 +121,9 @@ const POSTED_VALUE_RE = /^posted:\s+(\d{4}-\d{2}-\d{2})/iu;
 const ANNOTATION_SEPARATOR = '; ';
 const ANNOTATION_RE = /^refiltered (\d{4}-\d{2}-\d{2}) (\S+)(?:; ([\s\S]*))?$/;
 const ANNOTATION_PREFIX_RE = /^(\s*note:\s)refiltered \d{4}-\d{2}-\d{2} \S+; /iu;
+// The stamp --accept writes into a note, so later runs leave a row a person has
+// already looked at in Pending instead of sending it back to Review.
+const REVIEWED_STAMP_RE = /(?:^|; )reviewed \d{4}-\d{2}-\d{2}(?=;|$)/u;
 
 // Reason vocabulary mirrors scan's run-summary columns (SCAN_RUNS_HEADER), so
 // discard-analytics.mjs groups refilter discards beside scan's own counts.
@@ -110,6 +134,15 @@ export const REASONS = Object.freeze({
   location: 'filtered_location',
   postingAge: 'filtered_posting_age',
 });
+
+// Reasons a row goes to Review rather than Refiltered: every filter accepts it,
+// and portals.yml's `review_lane` asks for a person first.
+export const REVIEW_REASONS = Object.freeze({
+  unlabelledLevel: 'review_unlabelled_level',
+  tier: 'review_tier',
+});
+// The reason --dismiss parks a row under. No later run restores it.
+export const DISMISSED_REASON = 'dismissed_in_review';
 
 export const NOT_REAPPLIED = Object.freeze([
   'posted-date window (--since, --posted-after, --posted-before)',
@@ -210,8 +243,19 @@ export function readAnnotation(noteText) {
  * before a `rank:` segment, or at the end. Every other byte is kept.
  */
 export function parkBody(body, date, reason) {
+  return prependToNote(body, formatAnnotation(date, reason));
+}
+
+/**
+ * The body with a `reviewed {date}` stamp in its note, placed the way parkBody
+ * places an annotation, so a note the row already carried stays behind it.
+ */
+export function stampReviewed(body, date) {
+  return prependToNote(body, `reviewed ${date}`);
+}
+
+function prependToNote(body, annotation) {
   const row = parsePipelineRow(body);
-  const annotation = formatAnnotation(date, reason);
   const rawCells = [...row.rawCells];
   if (row.noteCellIndex >= 0) {
     rawCells[row.noteCellIndex] = rawCells[row.noteCellIndex]
@@ -249,6 +293,15 @@ export function unparkBody(body) {
   return { body: rawCells.join('|'), annotation };
 }
 
+function noteText(row) {
+  return row.noteCellIndex >= 0 ? row.rawCells[row.noteCellIndex].trim().replace(NOTE_LABEL_RE, '') : '';
+}
+
+/** Whether a person accepted this row out of Review (its note carries the stamp). */
+export function isReviewed(row) {
+  return REVIEWED_STAMP_RE.test(noteText(row));
+}
+
 // ── Rules ───────────────────────────────────────────────────────────
 
 /**
@@ -282,7 +335,70 @@ export function buildRefilterRules(config = {}, { blacklist = new Map(), now = D
     locationFilter: buildLocationFilter(settings.location_filter),
     postingAgeFilter: buildPostingAgeFilter(settings.max_posting_age_days, now),
     maxPostingAgeDays: settings.max_posting_age_days,
+    review: reviewSettings(settings.review_lane),
   };
+}
+
+function reviewSettings(value) {
+  const config = value && typeof value === 'object' ? value : {};
+  return {
+    unlabelledLevel: config.unlabelled_level === true,
+    tiers: Array.isArray(config.tiers)
+      ? config.tiers.filter((tier) => typeof tier === 'string').map((tier) => tier.toLowerCase())
+      : [],
+  };
+}
+
+export function reviewEnabled(rules) {
+  return Boolean(rules?.review && (rules.review.unlabelledLevel || rules.review.tiers.length > 0));
+}
+
+// classify-tier.mjs answers only with a tier, and a title with no level word
+// comes back as 'mid', the same answer as an explicit "Mid-level". Its rule is
+// that the leftmost level word decides, so a title that already carries one
+// keeps its tier when " Intern" is appended at the end, and a title with none
+// becomes 'intern'. The fork test pins this reading against real titles, so an
+// upstream change to the rule fails the suite instead of moving rows silently.
+const LEVEL_PROBE = ' Intern';
+
+/** Whether the classifier finds any seniority word in the title. */
+export function hasLevelWord(title) {
+  if (typeof title !== 'string' || title.trim() === '') return false;
+  return classifyTier(title) !== 'mid' || classifyTier(`${title}${LEVEL_PROBE}`) !== 'intern';
+}
+
+/**
+ * The review verdict for a row every filter accepts: null keeps it in Pending.
+ * A row a person already accepted is never sent back.
+ *
+ * @returns {{reason: string, detail: string}|null}
+ */
+export function reviewRow(row, rules) {
+  if (!reviewEnabled(rules) || isReviewed(row)) return null;
+  if (rules.review.unlabelledLevel && !hasLevelWord(row.title)) {
+    return { reason: REVIEW_REASONS.unlabelledLevel, detail: 'no level word in the title' };
+  }
+  if (rules.review.tiers.length > 0) {
+    const tier = classifyTier(row.title);
+    if (rules.review.tiers.includes(tier)) {
+      return { reason: `${REVIEW_REASONS.tier}:${tier}`, detail: `tier ${tier} is in review_lane.tiers` };
+    }
+  }
+  return null;
+}
+
+/**
+ * Where a row belongs under the current rules: a filter's rejection wins, then
+ * the review lane, then Pending.
+ *
+ * @returns {{lane: 'pending'|'review'|'refiltered', reason?: string, detail?: string}}
+ */
+export function placeRow(row, rules) {
+  const rejection = judgeRow(row, rules);
+  if (rejection) return { lane: 'refiltered', ...rejection };
+  const review = reviewRow(row, rules);
+  if (review) return { lane: 'review', ...review };
+  return { lane: 'pending' };
 }
 
 /**
@@ -327,7 +443,7 @@ export function loadRules({ portalsPath = PORTALS_PATH, blacklistPath = DEFAULT_
 // ── Document ────────────────────────────────────────────────────────
 
 function locateSections(lines) {
-  const sections = { pending: null, refiltered: null, processed: null };
+  const sections = { pending: null, review: null, refiltered: null, processed: null };
   let open = null;
   const close = (end) => { if (open) open.section.end = end; open = null; };
   lines.forEach((line, index) => {
@@ -335,6 +451,7 @@ function locateSections(lines) {
     close(index);
     const section = { start: index, end: lines.length, header: line };
     if (sections.pending === null && PENDING_HEADER_RE.test(line)) sections.pending = section;
+    else if (sections.review === null && REVIEW_HEADER_RE.test(line)) sections.review = section;
     else if (sections.refiltered === null && REFILTERED_HEADER_RE.test(line)) sections.refiltered = section;
     else if (sections.processed === null && PROCESSED_HEADER_RE.test(line)) sections.processed = section;
     open = { section };
@@ -355,25 +472,106 @@ export function refilteredHeaderFor(pendingHeader) {
   return /Pendientes/i.test(pendingHeader) ? '## Refiltradas' : '## Refiltered';
 }
 
+export function reviewHeaderFor(pendingHeader) {
+  return /Pendientes/i.test(pendingHeader) ? '## Revisar' : '## Review';
+}
+
+// The two sections this script owns, in the order they follow Pending.
+const OWNED_SECTIONS = ['review', 'refiltered'];
+
+function headersFor(sections) {
+  return {
+    review: sections.review ? sections.review.header : reviewHeaderFor(sections.pending.header),
+    refiltered: sections.refiltered ? sections.refiltered.header : refilteredHeaderFor(sections.pending.header),
+  };
+}
+
 function emptyCounts() {
   return {
     inspected: 0,
     pendingInspected: 0,
+    reviewInspected: 0,
     refilteredInspected: 0,
     keptInPending: 0,
+    movedToReview: 0,
+    movedToReviewByReason: {},
     movedOut: 0,
     movedOutByReason: {},
     restored: 0,
+    stillInReview: 0,
+    stillInReviewByReason: {},
     stillRefiltered: 0,
     stillRefilteredByReason: {},
+    dismissedKept: 0,
     reasonRefreshed: 0,
     annotationsCleared: 0,
-    untouched: { noMetadata: 0, expired: 0, errorRows: 0, indented: 0, unrecognizedInRefiltered: 0 },
+    untouched: { noMetadata: 0, expired: 0, errorRows: 0, indented: 0, unrecognizedInReview: 0, unrecognizedInRefiltered: 0 },
   };
 }
 
 function tally(byReason, reason) {
   byReason[reason] = (byReason[reason] || 0) + 1;
+}
+
+/**
+ * Rewrite the document's lines: drop `removed`, swap `replaced`, append each
+ * lane's new rows at the end of its section, remove an owned section left with
+ * no rows, and create a missing owned section that has rows. Review is created
+ * right after Pending, Refiltered before Processed or at the end. Insertions are
+ * keyed to the line they follow, so a removed anchor still marks the position.
+ */
+function rebuild(lines, sections, { removed, replaced, newRows, headers }) {
+  const insertAfter = new Map();
+  const plan = (section, rows) => {
+    if (rows.length === 0) return;
+    const anchor = sectionAnchor(lines, section);
+    if (!anchor.isHeader) {
+      insertAfter.set(anchor.index, [...(insertAfter.get(anchor.index) || []), ...rows]);
+      return;
+    }
+    const nextIsBlank = lines[anchor.index + 1] !== undefined && lines[anchor.index + 1].trim() === '';
+    insertAfter.set(anchor.index, nextIsBlank ? ['', ...rows] : ['', ...rows, '']);
+  };
+  plan(sections.pending, newRows.pending);
+
+  const creations = new Map();
+  const createAt = (key, name) => creations.set(key, [...(creations.get(key) || []), name]);
+  for (const name of OWNED_SECTIONS) {
+    const section = sections[name];
+    if (section) {
+      plan(section, newRows[name]);
+      // An owned section belongs to this script. Once its last row has gone,
+      // the header goes too, so a full round trip leaves no trace in the file.
+      const rowsLeft = newRows[name].length > 0 || lines.some((line, index) =>
+        index > section.start && index < section.end && ANY_ROW_RE.test(line) && !removed.has(index));
+      if (!rowsLeft) {
+        for (let index = section.start; index < section.end; index++) removed.add(index);
+      }
+    } else if (newRows[name].length > 0) {
+      if (name === 'review') createAt(sections.pending.end < lines.length ? sections.pending.end : 'end', name);
+      else createAt(sections.processed ? sections.processed.start : 'end', name);
+    }
+  }
+
+  const newSection = (output, name) => {
+    if (output.length > 0 && output[output.length - 1].trim() !== '') output.push('');
+    output.push(headers[name], '', ...newRows[name], '');
+  };
+  const output = [];
+  lines.forEach((line, index) => {
+    for (const name of creations.get(index) || []) newSection(output, name);
+    if (!removed.has(index)) output.push(replaced.has(index) ? replaced.get(index) : line);
+    if (insertAfter.has(index)) output.push(...insertAfter.get(index));
+  });
+  const atEnd = creations.get('end') || [];
+  if (atEnd.length > 0) {
+    const trailingNewline = output.length > 0 && output[output.length - 1] === '';
+    if (trailingNewline) output.pop();
+    for (const name of atEnd) newSection(output, name);
+    output.pop();
+    if (trailingNewline) output.push('');
+  }
+  return output;
 }
 
 /**
@@ -391,19 +589,35 @@ export function refilterDocument(text, rules, { today = localToday() } = {}) {
   const counts = emptyCounts();
   const verdicts = [];
   const movedOut = [];
+  const toReview = [];
   const restored = [];
-  const base = { sections, counts, verdicts, movedOut, restored, eol };
+  const base = { sections, counts, verdicts, movedOut, toReview, restored, eol, reviewEnabled: reviewEnabled(rules), rulesReview: rules.review };
 
   if (sections.pending === null) {
-    return { ...base, text, changed: false, noPendingSection: true, refilteredHeader: null };
+    return { ...base, text, changed: false, noPendingSection: true, refilteredHeader: null, reviewHeader: null };
   }
-  const refilteredHeader = sections.refiltered ? sections.refiltered.header : refilteredHeaderFor(sections.pending.header);
+  const headers = headersFor(sections);
 
   const removed = new Set();
   const replaced = new Map();
-  const parkedRows = [];
-  const restoredRows = [];
+  const newRows = { pending: [], review: [], refiltered: [] };
   const describe = (row) => ({ url: row.url, company: row.company, title: row.title });
+
+  // Send a row into one of the two parked sections, and record why.
+  const park = (row, body, date, route, from, index) => {
+    newRows[route.lane].push(`- [x] ${parkBody(body, date, route.reason)}`);
+    const entry = { ...describe(row), reason: route.reason, detail: route.detail, date, from };
+    if (route.lane === 'review') {
+      counts.movedToReview++;
+      tally(counts.movedToReviewByReason, route.reason);
+      toReview.push(entry);
+    } else {
+      counts.movedOut++;
+      tally(counts.movedOutByReason, route.reason);
+      movedOut.push(entry);
+    }
+    verdicts.push({ section: from, line: index + 1, ...entry, outcome: route.lane === 'review' ? 'to-review' : 'moved' });
+  };
 
   for (let index = sections.pending.start + 1; index < sections.pending.end; index++) {
     const line = lines[index];
@@ -439,8 +653,8 @@ export function refilterDocument(text, rules, { today = localToday() } = {}) {
     }
     counts.inspected++;
     counts.pendingInspected++;
-    const verdict = judgeRow(row, rules);
-    if (!verdict) {
+    const route = placeRow(row, rules);
+    if (route.lane === 'pending') {
       counts.keptInPending++;
       if (handRestored) {
         replaced.set(index, `- [ ] ${row.body}`);
@@ -450,117 +664,133 @@ export function refilterDocument(text, rules, { today = localToday() } = {}) {
       continue;
     }
     removed.add(index);
-    parkedRows.push(`- [x] ${parkBody(row.body, today, verdict.reason)}`);
-    counts.movedOut++;
-    tally(counts.movedOutByReason, verdict.reason);
-    const entry = { ...describe(row), reason: verdict.reason, detail: verdict.detail, date: today };
-    movedOut.push(entry);
-    verdicts.push({ section: 'pending', line: index + 1, ...entry, outcome: 'moved' });
+    park(row, row.body, today, route, 'pending', index);
   }
 
-  if (sections.refiltered) {
-    for (let index = sections.refiltered.start + 1; index < sections.refiltered.end; index++) {
+  // Both parked sections are judged again on every run.
+  const rejudge = (name) => {
+    const section = sections[name];
+    if (!section) return;
+    for (let index = section.start + 1; index < section.end; index++) {
       const line = lines[index];
       if (!ANY_ROW_RE.test(line)) continue;
       const match = line.match(PARKED_ROW_RE);
       const unparked = match ? unparkBody(match[1]) : null;
       if (!unparked) {
-        counts.untouched.unrecognizedInRefiltered++;
-        verdicts.push({ section: 'refiltered', line: index + 1, outcome: 'untouched', why: 'not a refilter row' });
+        counts.untouched[name === 'review' ? 'unrecognizedInReview' : 'unrecognizedInRefiltered']++;
+        verdicts.push({ section: name, line: index + 1, outcome: 'untouched', why: 'not a refilter row' });
         continue;
       }
       const row = parsePipelineRow(unparked.body);
       counts.inspected++;
-      counts.refilteredInspected++;
-      const verdict = judgeRow(row, rules);
-      if (!verdict) {
-        removed.add(index);
-        restoredRows.push(`- [ ] ${unparked.body}`);
-        counts.restored++;
-        const entry = { ...describe(row), previousReason: unparked.annotation.reason, date: unparked.annotation.date };
-        restored.push(entry);
-        verdicts.push({ section: 'refiltered', line: index + 1, ...entry, outcome: 'restored' });
+      counts[`${name}Inspected`]++;
+      if (unparked.annotation.reason === DISMISSED_REASON) {
+        // A person decided this one; no change to the rules brings it back.
+        counts.dismissedKept++;
+        verdicts.push({ section: name, line: index + 1, ...describe(row), outcome: 'dismissed', date: unparked.annotation.date });
         continue;
       }
-      counts.stillRefiltered++;
-      tally(counts.stillRefilteredByReason, verdict.reason);
-      const reparked = `- [x] ${parkBody(unparked.body, unparked.annotation.date, verdict.reason)}`;
+      const route = placeRow(row, rules);
+      if (route.lane === 'pending') {
+        removed.add(index);
+        newRows.pending.push(`- [ ] ${unparked.body}`);
+        counts.restored++;
+        const entry = { ...describe(row), previousReason: unparked.annotation.reason, date: unparked.annotation.date, from: name };
+        restored.push(entry);
+        verdicts.push({ section: name, line: index + 1, ...entry, outcome: 'restored' });
+        continue;
+      }
+      if (route.lane !== name) {
+        // Between the two parked sections the date stays: it records when the
+        // row first left Pending.
+        removed.add(index);
+        park(row, unparked.body, unparked.annotation.date, route, name, index);
+        continue;
+      }
+      const still = name === 'review' ? 'stillInReview' : 'stillRefiltered';
+      counts[still]++;
+      tally(counts[`${still}ByReason`], route.reason);
+      const reparked = `- [x] ${parkBody(unparked.body, unparked.annotation.date, route.reason)}`;
       const refreshed = reparked !== line;
       if (refreshed) {
         replaced.set(index, reparked);
         counts.reasonRefreshed++;
       }
       verdicts.push({
-        section: 'refiltered',
+        section: name,
         line: index + 1,
         ...describe(row),
         outcome: 'still',
-        reason: verdict.reason,
-        detail: verdict.detail,
+        reason: route.reason,
+        detail: route.detail,
         previousReason: unparked.annotation.reason,
         date: unparked.annotation.date,
         refreshed,
       });
     }
-  }
-
-  // Rebuild. Insertions are keyed to the line they follow, so a removed anchor
-  // still marks the position.
-  const insertAfter = new Map();
-  const plan = (section, rows) => {
-    if (rows.length === 0) return;
-    const anchor = sectionAnchor(lines, section);
-    if (!anchor.isHeader) {
-      insertAfter.set(anchor.index, rows);
-      return;
-    }
-    const nextIsBlank = lines[anchor.index + 1] !== undefined && lines[anchor.index + 1].trim() === '';
-    insertAfter.set(anchor.index, nextIsBlank ? ['', ...rows] : ['', ...rows, '']);
   };
-  plan(sections.pending, restoredRows);
-  if (sections.refiltered) {
-    plan(sections.refiltered, parkedRows);
-    // The section belongs to this script. Once every parked row has gone back,
-    // the header goes too, so a full round trip leaves no trace in the file.
-    const rowsLeft = parkedRows.length > 0 || lines.some((line, index) =>
-      index > sections.refiltered.start && index < sections.refiltered.end && ANY_ROW_RE.test(line) && !removed.has(index));
-    if (!rowsLeft) {
-      for (let index = sections.refiltered.start; index < sections.refiltered.end; index++) removed.add(index);
-    }
-  }
+  rejudge('review');
+  rejudge('refiltered');
 
-  const createAt = !sections.refiltered && parkedRows.length > 0
-    ? (sections.processed ? sections.processed.start : null)
-    : undefined;
-  const newSection = (output) => {
-    if (output.length > 0 && output[output.length - 1].trim() !== '') output.push('');
-    output.push(refilteredHeader, '', ...parkedRows, '');
+  const newText = rebuild(lines, sections, { removed, replaced, newRows, headers }).join(eol);
+  return {
+    ...base,
+    text: newText,
+    changed: newText !== text,
+    noPendingSection: false,
+    refilteredHeader: headers.refiltered,
+    reviewHeader: headers.review,
   };
+}
 
-  const output = [];
-  lines.forEach((line, index) => {
-    if (createAt === index) newSection(output);
-    if (!removed.has(index)) output.push(replaced.has(index) ? replaced.get(index) : line);
-    if (insertAfter.has(index)) output.push(...insertAfter.get(index));
-  });
-  if (createAt === null) {
-    const trailingNewline = output.length > 0 && output[output.length - 1] === '';
-    if (trailingNewline) output.pop();
-    newSection(output);
-    output.pop();
-    if (trailingNewline) output.push('');
+/**
+ * A person's decision on the Review row with this URL (every row with it, when
+ * the inbox holds duplicates). `accept` sends it to the end of Pending with a
+ * `reviewed {date}` stamp, so later runs keep it there while the filters still
+ * pass it. `dismiss` parks it in Refiltered under DISMISSED_REASON, which no
+ * later run restores. Pure, like refilterDocument.
+ *
+ * @throws {RefilterError} when the inbox has no Review row with that URL.
+ */
+export function decideReviewRow(text, url, decision, { today = localToday() } = {}) {
+  if (decision !== 'accept' && decision !== 'dismiss') throw new RefilterError(`unknown review decision: ${decision}`);
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const lines = text.split(/\r?\n/);
+  const sections = locateSections(lines);
+  if (sections.pending === null) throw new RefilterError('the inbox has no Pending section');
+  const headers = headersFor(sections);
+  if (sections.review === null) throw new RefilterError(`the inbox has no ${headers.review.replace(/^##\s+/, '')} section`);
+
+  const wanted = normalizeUrlForDedup(String(url ?? '').trim());
+  const newRows = { pending: [], review: [], refiltered: [] };
+  const removed = new Set();
+  const rows = [];
+  for (let index = sections.review.start + 1; index < sections.review.end; index++) {
+    const match = lines[index].match(PARKED_ROW_RE);
+    const unparked = match ? unparkBody(match[1]) : null;
+    if (!unparked) continue;
+    const row = parsePipelineRow(unparked.body);
+    if (!row.url || normalizeUrlForDedup(row.url) !== wanted) continue;
+    removed.add(index);
+    rows.push({ url: row.url, company: row.company, title: row.title, reason: unparked.annotation.reason, date: unparked.annotation.date });
+    if (decision === 'accept') newRows.pending.push(`- [ ] ${stampReviewed(unparked.body, today)}`);
+    else newRows.refiltered.push(`- [x] ${parkBody(unparked.body, today, DISMISSED_REASON)}`);
   }
-
-  const newText = output.join(eol);
-  return { ...base, text: newText, changed: newText !== text, noPendingSection: false, refilteredHeader };
+  if (rows.length === 0) {
+    throw new RefilterError(`no row in ${headers.review.replace(/^##\s+/, '')} has the URL ${url}`);
+  }
+  const newText = rebuild(lines, sections, { removed, replaced: new Map(), newRows, headers }).join(eol);
+  return { text: newText, changed: newText !== text, decision, rows, today, eol, reviewHeader: headers.review, refilteredHeader: headers.refiltered };
 }
 
 // ── Files ───────────────────────────────────────────────────────────
 
 /**
- * Refilter the inbox on disk. Dry run reads and judges; apply takes the
- * pipeline lock, backs the file up, writes through scan's atomic writer and
- * appends one discard-log line per row newly moved out of Pending.
+ * Refilter the inbox on disk, or apply one review decision when `decision` is
+ * given ({kind: 'accept'|'dismiss', url}). Dry run reads and judges; apply
+ * takes the pipeline lock, backs the file up, writes through scan's atomic
+ * writer and appends one discard-log line per row newly parked in Refiltered,
+ * dismissals included. A move into Review is not a discard and is not logged.
  */
 export async function refilterPipeline(options = {}) {
   const {
@@ -569,38 +799,45 @@ export async function refilterPipeline(options = {}) {
     blacklistPath = DEFAULT_BLACKLIST_PATH,
     discardLogPath = DEFAULT_DISCARD_LOG_PATH,
     apply = false,
+    decision = null,
     today = localToday(),
     now = Date.now(),
     timestamp = () => new Date().toISOString(),
   } = options;
-  const rules = loadRules({ portalsPath, blacklistPath, now });
+  // A decision moves one row a person named; it applies no rule, so it needs
+  // no rules file.
+  const rules = decision ? null : loadRules({ portalsPath, blacklistPath, now });
   if (!existsSync(pipelinePath)) throw new RefilterError(`pipeline not found at ${pipelinePath}`);
   const paths = {
     pipelinePath,
-    portalsPath,
-    blacklistPath: existsSync(blacklistPath) ? blacklistPath : null,
-    blacklistCompanies: rules.blacklist.size,
+    portalsPath: rules ? portalsPath : null,
+    blacklistPath: rules && existsSync(blacklistPath) ? blacklistPath : null,
+    blacklistCompanies: rules ? rules.blacklist.size : 0,
     discardLogPath,
     backupPath: `${pipelinePath}.pre-refilter.bak`,
   };
+  const compute = (text) => (decision
+    ? decideReviewRow(text, decision.url, decision.kind, { today })
+    : refilterDocument(text, rules, { today }));
+  const discards = (result) => (decision
+    ? (decision.kind === 'dismiss' ? result.rows.map((row) => ({ url: row.url, reason: DISMISSED_REASON })) : [])
+    : result.movedOut);
 
   if (!apply) {
-    const result = refilterDocument(readFileSync(pipelinePath, 'utf-8'), rules, { today });
+    const result = compute(readFileSync(pipelinePath, 'utf-8'));
     return { ...result, apply: false, paths, written: null };
   }
 
   return withPipelineLock(pipelinePath, async () => {
-    const result = refilterDocument(readFileSync(pipelinePath, 'utf-8'), rules, { today });
+    const result = compute(readFileSync(pipelinePath, 'utf-8'));
     if (!result.changed) return { ...result, apply: true, paths, written: null };
     copyFileSync(pipelinePath, paths.backupPath);
     atomicWriteFile(pipelinePath, result.text);
-    let logLines = 0;
-    if (result.movedOut.length > 0) {
+    const logged = discards(result);
+    if (logged.length > 0) {
       mkdirSync(path.dirname(discardLogPath), { recursive: true });
       const stamp = timestamp();
-      const lines = result.movedOut.map((entry) => `${stamp}\t${entry.url}\trefilter: ${entry.reason}\n`).join('');
-      appendFileSync(discardLogPath, lines, 'utf-8');
-      logLines = result.movedOut.length;
+      appendFileSync(discardLogPath, logged.map((entry) => `${stamp}\t${entry.url}\trefilter: ${entry.reason}\n`).join(''), 'utf-8');
     }
     return {
       ...result,
@@ -609,8 +846,8 @@ export async function refilterPipeline(options = {}) {
       written: {
         pipelinePath,
         backupPath: paths.backupPath,
-        discardLogPath: logLines > 0 ? discardLogPath : null,
-        logLines,
+        discardLogPath: logged.length > 0 ? discardLogPath : null,
+        logLines: logged.length,
       },
     };
   });
@@ -635,28 +872,79 @@ function sampleLines(entries, arrow) {
   });
 }
 
+function sectionName(header) {
+  return header.replace(/^##\s+/, '');
+}
+
+function reviewLaneLine(result) {
+  if (!result.reviewEnabled) return 'Review lane: off (portals.yml has no review_lane)';
+  const review = result.rulesReview;
+  const parts = [];
+  if (review?.unlabelledLevel) parts.push('titles with no level word');
+  if (review?.tiers?.length) parts.push(`tiers ${review.tiers.join(', ')}`);
+  return `Review lane: on (${parts.join('; ')})`;
+}
+
+function footerLines(result, { nothingToChange, noLogLine }) {
+  const lines = [];
+  if (!result.apply) {
+    lines.push(result.changed ? '(dry run: nothing written)' : `(dry run: nothing written; ${nothingToChange})`);
+  } else if (!result.written) {
+    lines.push(`Nothing to change: ${nothingToChange}. No backup written, no discard log appended.`);
+  } else {
+    lines.push(`Written: ${result.written.pipelinePath}`);
+    lines.push(`Backup:  ${result.written.backupPath}`);
+    lines.push(result.written.discardLogPath
+      ? `Discard log: ${result.written.discardLogPath} (+${plural(result.written.logLines, 'line')})`
+      : `Discard log: nothing appended (${noLogLine})`);
+  }
+  return lines;
+}
+
 export function renderReport(result) {
   const { counts, paths } = result;
   const lines = [];
   lines.push(`Inbox refilter: ${result.apply ? 'apply' : 'dry run'}`);
   lines.push(`Inbox: ${paths.pipelinePath}`);
   lines.push(`Rules: ${paths.portalsPath}${paths.blacklistPath ? `, blacklist ${paths.blacklistPath} (${plural(paths.blacklistCompanies, 'company', 'companies')})` : ', no blacklist file'}`);
+  lines.push(reviewLaneLine(result));
   lines.push('');
   if (result.noPendingSection) {
     lines.push('No Pending section in the inbox; nothing to refilter.');
   } else {
     const untouched = counts.untouched;
-    lines.push(`Entries inspected: ${counts.inspected} (${counts.pendingInspected} in Pending, ${counts.refilteredInspected} in ${result.refilteredHeader.replace(/^##\s+/, '')})`);
+    const review = sectionName(result.reviewHeader);
+    const refiltered = sectionName(result.refilteredHeader);
+    const showReview = result.reviewEnabled || counts.reviewInspected > 0 || counts.movedToReview > 0;
+    lines.push(`Entries inspected: ${counts.inspected} (${counts.pendingInspected} in Pending, ${showReview ? `${counts.reviewInspected} in ${review}, ` : ''}${counts.refilteredInspected} in ${refiltered})`);
     lines.push(`  kept in Pending:      ${counts.keptInPending}`);
-    lines.push(`  moved out of Pending: ${counts.movedOut}`);
+    if (showReview) {
+      lines.push(`  moved to ${review}:${' '.repeat(Math.max(1, 12 - review.length))}${counts.movedToReview}`);
+      lines.push(...byReasonLines(counts.movedToReviewByReason));
+    }
+    lines.push(`  moved to ${refiltered}:${' '.repeat(Math.max(1, 12 - refiltered.length))}${counts.movedOut}`);
     lines.push(...byReasonLines(counts.movedOutByReason));
     lines.push(`  restored to Pending:  ${counts.restored}`);
+    if (showReview) {
+      lines.push(`  still in ${review}:${' '.repeat(Math.max(1, 12 - review.length))}${counts.stillInReview}`);
+      lines.push(...byReasonLines(counts.stillInReviewByReason));
+    }
     lines.push(`  still refiltered:     ${counts.stillRefiltered}${counts.reasonRefreshed ? ` (${counts.reasonRefreshed} with the reason refreshed)` : ''}`);
     lines.push(...byReasonLines(counts.stillRefilteredByReason));
-    lines.push(`  left untouched:       bare URL ${untouched.noMetadata}, expired ${untouched.expired}, error rows ${untouched.errorRows}, indented ${untouched.indented}, unrecognized rows in the refiltered section ${untouched.unrecognizedInRefiltered}`);
+    if (counts.dismissedKept) lines.push(`  dismissed in review, kept parked: ${counts.dismissedKept}`);
+    lines.push(`  left untouched:       bare URL ${untouched.noMetadata}, expired ${untouched.expired}, error rows ${untouched.errorRows}, indented ${untouched.indented}, unrecognized rows in the review section ${untouched.unrecognizedInReview}, in the refiltered section ${untouched.unrecognizedInRefiltered}`);
     if (counts.annotationsCleared) lines.push(`  stale annotations cleared from kept rows: ${counts.annotationsCleared}`);
+    if (result.toReview.length > 0) {
+      lines.push('', `Moved to ${review}, for a person to decide${result.toReview.length > SAMPLE_LIMIT ? ` (first ${SAMPLE_LIMIT} of ${result.toReview.length})` : ''}:`);
+      // The URL goes on its own line because --accept and --dismiss take it.
+      for (const entry of result.toReview.slice(0, SAMPLE_LIMIT)) {
+        lines.push(`  ${entry.company || '?'} | ${entry.title || '?'} -> ${entry.reason}${entry.detail ? ` (${entry.detail})` : ''}`);
+        lines.push(`      ${entry.url}`);
+      }
+      lines.push('  Decide with: node fork/refilter.mjs --accept <url> --apply   or   --dismiss <url> --apply');
+    }
     if (result.movedOut.length > 0) {
-      lines.push('', `Moved out of Pending${result.movedOut.length > SAMPLE_LIMIT ? ` (first ${SAMPLE_LIMIT} of ${result.movedOut.length})` : ''}:`);
+      lines.push('', `Moved to ${refiltered}${result.movedOut.length > SAMPLE_LIMIT ? ` (first ${SAMPLE_LIMIT} of ${result.movedOut.length})` : ''}:`);
       lines.push(...sampleLines(result.movedOut, (entry) => entry.reason));
     }
     if (result.restored.length > 0) {
@@ -666,26 +954,50 @@ export function renderReport(result) {
   }
   lines.push('', `Not re-applied, because a pipeline row lacks what they read: ${NOT_REAPPLIED.join(', ')}.`);
   lines.push('');
-  if (!result.apply) {
-    lines.push(result.changed ? '(dry run: nothing written)' : '(dry run: nothing written; the inbox already matches the current rules)');
-  } else if (!result.written) {
-    lines.push('Nothing to change: the inbox already matches the current rules. No backup written, no discard log appended.');
-  } else {
-    lines.push(`Written: ${result.written.pipelinePath}`);
-    lines.push(`Backup:  ${result.written.backupPath}`);
-    lines.push(result.written.discardLogPath
-      ? `Discard log: ${result.written.discardLogPath} (+${plural(result.written.logLines, 'line')})`
-      : 'Discard log: nothing appended (no row left Pending)');
+  lines.push(...footerLines(result, {
+    nothingToChange: 'the inbox already matches the current rules',
+    noLogLine: 'no row was parked in the refiltered section',
+  }));
+  return lines.join('\n');
+}
+
+export function renderDecision(result) {
+  const lines = [];
+  lines.push(`Review decision: ${result.decision} (${result.apply ? 'apply' : 'dry run'})`);
+  lines.push(`Inbox: ${result.paths.pipelinePath}`);
+  lines.push('');
+  for (const row of result.rows) {
+    const where = result.decision === 'accept'
+      ? `Pending, with "reviewed ${result.today}" in its note`
+      : `${sectionName(result.refilteredHeader)}, as ${DISMISSED_REASON}; no later run restores it`;
+    lines.push(`  ${row.company || '?'} | ${row.title || '?'} -> ${where} (was ${row.reason}, since ${row.date})`);
   }
+  lines.push('');
+  lines.push(...footerLines(result, {
+    nothingToChange: 'the inbox is already in that state',
+    noLogLine: 'an accepted row is not a discard',
+  }));
   return lines.join('\n');
 }
 
 export function toJson(result) {
+  if (result.decision) {
+    return {
+      mode: result.apply ? 'apply' : 'dry-run',
+      decision: result.decision,
+      changed: result.changed,
+      rows: result.rows,
+      paths: result.paths,
+      written: result.written,
+    };
+  }
   return {
     mode: result.apply ? 'apply' : 'dry-run',
     changed: result.changed,
     noPendingSection: result.noPendingSection,
     refilteredHeader: result.refilteredHeader,
+    reviewHeader: result.reviewHeader,
+    reviewEnabled: result.reviewEnabled,
     paths: result.paths,
     counts: result.counts,
     verdicts: result.verdicts,
@@ -696,19 +1008,26 @@ export function toJson(result) {
 
 // ── CLI ─────────────────────────────────────────────────────────────
 
-const KNOWN_FLAGS = ['--apply', '--pipeline', '--portals', '--json', '--help', '-h'];
-const VALUE_FLAGS = ['--pipeline', '--portals'];
+const KNOWN_FLAGS = ['--apply', '--pipeline', '--portals', '--json', '--accept', '--dismiss', '--help', '-h'];
+const VALUE_FLAGS = ['--pipeline', '--portals', '--accept', '--dismiss'];
 const USAGE = `Usage: node fork/refilter.mjs [--apply] [--pipeline <path>] [--portals <path>] [--json]
+       node fork/refilter.mjs --accept <url> | --dismiss <url> [--apply] [--pipeline <path>] [--json]
 
 Re-applies the current portals.yml and data/blacklist.md rules to the rows already
 in the inbox's Pending section, with scan.mjs's own filter functions, in scan's
-order: blacklist, title keywords, skip_tiers, location, posting age.
+order: blacklist, title keywords, skip_tiers, location, posting age. Rows the
+filters accept but portals.yml's review_lane asks a person about go to a Review
+section instead of staying in Pending.
 
 Dry run by default: prints what would move and writes nothing.
 
   --apply            write the inbox (a .pre-refilter.bak copy is taken first),
-                     park rejected rows under a Refiltered section, restore parked
-                     rows the current rules accept, append data/discard.log
+                     park rejected rows under a Refiltered section and review rows
+                     under a Review section, restore parked rows the current rules
+                     accept, append data/discard.log
+  --accept <url>     send the Review row with this URL to Pending, stamped
+                     "reviewed {date}" so later runs keep it there
+  --dismiss <url>    park the Review row with this URL in Refiltered for good
   --pipeline <path>  inbox to refilter (default: CAREER_OPS_PIPELINE, else <data root>/data/pipeline.md)
   --portals <path>   rules file (default: CAREER_OPS_PORTALS, else <data root>/portals.yml)
   --json             one JSON object on stdout with the counts and per-row verdicts
@@ -723,13 +1042,22 @@ async function main(argv) {
   const json = hasFlag(argv, '--json');
   const pipelineFlag = flagValue(argv, '--pipeline');
   const portalsFlag = flagValue(argv, '--portals');
+  const acceptUrl = flagValue(argv, '--accept');
+  const dismissUrl = flagValue(argv, '--dismiss');
+  if (acceptUrl && dismissUrl) {
+    console.error('Error: --accept and --dismiss decide one row each; run them separately.');
+    return 1;
+  }
+  const decision = acceptUrl ? { kind: 'accept', url: acceptUrl } : dismissUrl ? { kind: 'dismiss', url: dismissUrl } : null;
   try {
     const result = await refilterPipeline({
       pipelinePath: pipelineFlag ? path.resolve(pipelineFlag) : PIPELINE_PATH,
       portalsPath: portalsFlag ? path.resolve(portalsFlag) : PORTALS_PATH,
       apply,
+      decision,
     });
-    console.log(json ? JSON.stringify(toJson(result), null, 2) : renderReport(result));
+    if (json) console.log(JSON.stringify(toJson(result), null, 2));
+    else console.log(decision ? renderDecision(result) : renderReport(result));
     return 0;
   } catch (error) {
     if (error instanceof RefilterError) {

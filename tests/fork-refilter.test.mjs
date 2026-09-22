@@ -406,3 +406,127 @@ let afterFirstApply = null;
     lock.release();
   }
 }
+
+// ── 14. The review lane: rows the filters pass but a person should see ─────
+
+{
+  const REVIEW_RULES = ['skip_tiers: [senior]', 'review_lane:', '  unlabelled_level: true', ''].join('\n');
+  const REVIEW_ROWS = [
+    '- [ ] https://jobs.example.com/rv/1 | Acme | Software Engineer | Melbourne',
+    '- [ ] https://jobs.example.com/rv/2 | Acme | Platform Engineer | note: warm intro',
+  ];
+  const KEEP_ROWS = [
+    '- [ ] https://jobs.example.com/rv/k1 | Acme | Junior Developer',
+    '- [ ] https://jobs.example.com/rv/k2 | Acme | Graduate Program 2027',
+  ];
+  const SENIOR_ROW = '- [ ] https://jobs.example.com/rv/x1 | Acme | Senior Software Engineer';
+  const inbox = ['# Pipeline', '', '## Pending', '', ...KEEP_ROWS, ...REVIEW_ROWS, SENIOR_ROW, '', '## Processed', '', '- [x] #001 | https://jobs.example.com/done/1 | Acme | Engineer | 4.0/5 | PDF ❌', ''].join('\n');
+  writeFileSync(portalsPath, REVIEW_RULES);
+  writeFileSync(pipelinePath, inbox);
+  removeIfPresent(blacklistPath);
+  removeIfPresent(discardLogPath);
+
+  const json = refilterJson(['--apply']);
+  const text = readInbox();
+  const pending = sectionRows(text, /^## Pending$/) || [];
+  const review = sectionRows(text, /^## Review$/) || [];
+  const parked = sectionRows(text, /^## Refiltered$/) || [];
+  check('review lane: rows with no level word go to Review, parked with the review reason',
+    review.length === 2 && review.every((row) => new RegExp(`^- \\[x\\] .* note: ${ANNOTATION} review_unlabelled_level`).test(row)), JSON.stringify(review));
+  check('review lane: a note the row carried stays behind the annotation', review.some((row) => /\/rv\/2 .*note: refiltered \d{4}-\d{2}-\d{2} review_unlabelled_level; warm intro$/.test(row)), JSON.stringify(review));
+  check('review lane: rows with a level word stay in Pending, a skipped tier still goes to Refiltered',
+    JSON.stringify(pending) === JSON.stringify(KEEP_ROWS) && parked.length === 1 && parked[0].includes('/rv/x1 ') && parked[0].includes('filtered_tier:senior'), JSON.stringify({ pending, parked }));
+  check('review lane: Review sits right after Pending, before Refiltered and Processed',
+    headerIndex(text, /^## Pending$/) < headerIndex(text, /^## Review$/) && headerIndex(text, /^## Review$/) < headerIndex(text, /^## Refiltered$/) && headerIndex(text, /^## Refiltered$/) < headerIndex(text, /^## Processed$/));
+  check('review lane: the counts separate review moves from discards', json?.counts?.movedToReview === 2 && json?.counts?.movedOut === 1 && json?.reviewEnabled === true, JSON.stringify(json?.counts));
+  const logLines = existsSync(discardLogPath) ? readFileSync(discardLogPath, 'utf-8').trim().split('\n') : [];
+  check('review lane: a move into Review is not a discard, only the rejected row is logged', logLines.length === 1 && logLines[0].includes('/rv/x1\t'), logLines.join(' || '));
+
+  const { loadSeenUrls, normalizeUrlForDedup, appendToPipeline } = await import(pathToFileURL(join(ROOT, 'scan.mjs')).href);
+  const { parsePendingEntries } = await import(pathToFileURL(join(ROOT, 'rank-pipeline.mjs')).href);
+  const pendingUrls = parsePendingEntries(text).map((entry) => entry.url);
+  check('review lane: rank-pipeline does not hand out Review rows', !pendingUrls.some((url) => url.includes('/rv/1') || url.includes('/rv/2')) && pendingUrls.some((url) => url.includes('/rv/k1')));
+  const { seen } = loadSeenUrls({}, { scanHistoryPath: join(dataRoot, 'data', 'scan-history.tsv'), pipelinePath, applicationsPath: join(dataRoot, 'data', 'applications.md') });
+  check('review lane: scan counts Review rows as seen, so a rescan does not re-add them', ['https://jobs.example.com/rv/1', 'https://jobs.example.com/rv/2'].every((url) => seen.has(normalizeUrlForDedup(url))));
+  const scanCopy = join(dataRoot, 'data', 'pipeline-review-scan-copy.md');
+  writeFileSync(scanCopy, text);
+  await appendToPipeline([{ url: 'https://jobs.example.com/rv/new', company: 'New Co', title: 'Junior Engineer' }], { pipelinePath: scanCopy });
+  const appended = readFileSync(scanCopy, 'utf-8');
+  const newRowAt = appended.split('\n').findIndex((line) => line.startsWith('- [ ] https://jobs.example.com/rv/new '));
+  check('review lane: scan still appends a new offer inside Pending, above Review', newRowAt > headerIndex(appended, /^## Pending$/) && newRowAt < headerIndex(appended, /^## Review$/), String(newRowAt));
+
+  const settled = readInbox();
+  refilter(['--apply']);
+  check('review lane: a second apply under the same rules changes nothing', readInbox() === settled);
+
+  const accepted = refilterJson(['--accept', 'https://jobs.example.com/rv/1', '--apply']);
+  const afterAccept = readInbox();
+  const acceptedRow = (sectionRows(afterAccept, /^## Pending$/) || []).find((row) => row.includes('/rv/1 '));
+  check('review lane: --accept sends the row to the end of Pending with a reviewed stamp',
+    accepted?.decision === 'accept' && /^- \[ \] https:\/\/jobs\.example\.com\/rv\/1 \| Acme \| Software Engineer \| Melbourne \| note: reviewed \d{4}-\d{2}-\d{2}$/.test(acceptedRow || '')
+    && (sectionRows(afterAccept, /^## Pending$/) || []).at(-1) === acceptedRow, acceptedRow);
+  refilter(['--apply']);
+  check('review lane: a later run leaves an accepted row in Pending', readInbox() === afterAccept);
+
+  const logBefore = readFileSync(discardLogPath, 'utf-8');
+  refilter(['--dismiss', 'https://jobs.example.com/rv/2', '--apply']);
+  const afterDismiss = readInbox();
+  const dismissed = (sectionRows(afterDismiss, /^## Refiltered$/) || []).find((row) => row.includes('/rv/2 '));
+  check('review lane: --dismiss parks the row in Refiltered with its note kept',
+    /\| note: refiltered \d{4}-\d{2}-\d{2} dismissed_in_review; warm intro$/.test(dismissed || ''), dismissed);
+  check('review lane: the emptied Review section is removed', headerIndex(afterDismiss, /^## Review$/) === -1);
+  const logAdded = readFileSync(discardLogPath, 'utf-8').slice(logBefore.length);
+  check('review lane: a dismissal is logged as a discard', /\thttps:\/\/jobs\.example\.com\/rv\/2\trefilter: dismissed_in_review\n$/.test(logAdded), logAdded);
+
+  writeFileSync(portalsPath, LOOSE_RULES);
+  refilter(['--apply']);
+  const loosened = readInbox();
+  check('review lane: loosening the rules restores the rejected row but never the dismissed one',
+    (sectionRows(loosened, /^## Pending$/) || []).includes(SENIOR_ROW) && (sectionRows(loosened, /^## Refiltered$/) || []).some((row) => row.includes('dismissed_in_review')));
+
+  check('review lane: an unknown URL is refused with a message and exit 1',
+    refilter(['--accept', 'https://jobs.example.com/rv/none']) === null && lastRunFailure()?.status === 1 && /no Review section|no row in Review/.test(lastRunFailure()?.stderr || ''), stderrTail());
+  check('review lane: --accept and --dismiss together are refused',
+    refilter(['--accept', 'a', '--dismiss', 'b']) === null && lastRunFailure()?.status === 1, stderrTail());
+}
+
+{
+  // Round trip and the moves between the two parked sections, on the pure function.
+  const mod = await import(pathToFileURL(SCRIPT).href);
+  const { buildRefilterRules, refilterDocument, hasLevelWord, decideReviewRow } = mod;
+  const original = ['# Pipeline', '', '## Pending', '', '- [ ] https://jobs.example.com/rt/k | Acme | Junior Developer', '- [ ] https://jobs.example.com/rt/r | Acme | Software Engineer | Remote', '', '## Processed', ''].join('\n');
+  const on = buildRefilterRules({ review_lane: { unlabelled_level: true } });
+  const off = buildRefilterRules({});
+  const parkedText = refilterDocument(original, on, { today: '2026-09-22' }).text;
+  check('review lane: switching the lane off brings the row back byte for byte, section and all',
+    refilterDocument(parkedText, off, { today: '2026-09-23' }).text === original);
+
+  const tightened = refilterDocument(parkedText, buildRefilterRules({ review_lane: { unlabelled_level: true }, title_filter: { negative: ['software'] } }), { today: '2026-09-23' });
+  const nowParked = sectionRows(tightened.text, /^## Refiltered$/) || [];
+  check('review lane: a Review row a filter now rejects moves to Refiltered, keeping the date it left Pending',
+    nowParked.length === 1 && nowParked[0].includes('note: refiltered 2026-09-22 filtered_title') && headerIndex(tightened.text, /^## Review$/) === -1 && tightened.movedOut.length === 1 && tightened.movedOut[0].from === 'review', JSON.stringify(nowParked));
+
+  const tierRules = buildRefilterRules({ review_lane: { tiers: ['mid'] } });
+  const tiered = refilterDocument(['## Pending', '', '- [ ] u1 | Acme | Software Engineer II', '- [ ] u2 | Acme | Junior Engineer', ''].join('\n'), tierRules, { today: '2026-09-22' });
+  check('review lane: tiers routes an explicitly mid-level title to Review and leaves the rest',
+    (sectionRows(tiered.text, /^## Review$/) || []).some((row) => row.includes('u1 ') && row.includes('review_tier:mid')) && (sectionRows(tiered.text, /^## Pending$/) || []).some((row) => row.includes('u2 ')));
+
+  const spanish = refilterDocument(['## Pendientes', '', '- [ ] u3 | Acme | Software Engineer', ''].join('\n'), on, { today: '2026-09-22' });
+  check('review lane: a Spanish-headed inbox gets ## Revisar', /\n## Revisar\n/.test(spanish.text), spanish.text);
+
+  check('review lane: a decision on a URL the section does not hold throws', (() => {
+    try { decideReviewRow(parkedText, 'https://jobs.example.com/rt/k', 'accept'); return false; } catch (error) { return /no row in Review/.test(error.message); }
+  })());
+
+  // The drift guard for the level-word probe. It reads classify-tier.mjs's
+  // leftmost-word rule; if upstream changes the rule, these fail here first.
+  const expectations = [
+    ['Software Engineer', false], ['AI Solutions Engineer', false], ['Platform Engineer (Contract)', false],
+    ['Intermediate Developer', false], ['Graduate Software Engineer', false],
+    ['Mid-level Software Engineer', true], ['Software Engineer II', true], ['Software Engineer III', true],
+    ['Senior Engineer', true], ['Junior Developer', true], ['Graduate Program 2027', true],
+    ['Engineering Intern', true], ['Engineer I', true], ['Associate Consultant', true], ['Head of Data', true],
+  ];
+  const wrong = expectations.filter(([title, expected]) => hasLevelWord(title) !== expected).map(([title]) => title);
+  check('review lane: the level-word probe agrees with classify-tier.mjs on real titles', wrong.length === 0, wrong.join(', '));
+}
