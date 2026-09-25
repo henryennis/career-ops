@@ -1,0 +1,15 @@
+{
+  "name": "@fork/likec4-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "description": "LikeC4 toolchain for this fork, kept out of the repository's own package.json so taking an upstream release never has to merge a dependency line.",
+  "type": "module",
+  "scripts": {
+    "validate": "likec4 validate src",
+    "serve": "likec4 serve src",
+    "fmt": "likec4 fmt src"
+  },
+  "devDependencies": {
+    "likec4": "1.59.4"
+  }
+}

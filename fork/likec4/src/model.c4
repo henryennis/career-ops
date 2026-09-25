@@ -1,0 +1,30 @@
+// PLACEHOLDER. This is deliberately not a model of career-ops.
+//
+// The architecture is documented in a separate pass. What lives here now is the
+// smallest model that exercises the whole pipeline end to end: validate, render
+// to Mermaid, embed in a wiki page, render in a browser. Its only job is to make
+// a broken toolchain fail loudly before anyone has written anything worth
+// losing.
+//
+// When the real model arrives, delete this file. The view in views.c4 names
+// `placeholder`, so replacing one means replacing the other.
+model {
+  placeholder = system 'Placeholder system' {
+    description '
+      Replace this with the real model. It exists so `likec4 validate` has
+      something to validate and the Mermaid and web component paths have
+      something to draw.
+    '
+
+    placeholderPart = component 'A part of it' {
+      description 'Proves a nested element renders.'
+    }
+  }
+
+  placeholderActor = actor 'Someone' {
+    description 'Proves a relationship renders.'
+  }
+
+  placeholderActor -> placeholder 'uses'
+  placeholderActor -> placeholder.placeholderPart 'reaches'
+}
