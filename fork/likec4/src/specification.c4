@@ -1,0 +1,49 @@
+// The vocabulary every element and relationship in this model is allowed to use.
+//
+// LikeC4 refuses an element whose kind is not declared here, which is the point:
+// the specification is the schema, and a model that validates cannot invent a
+// kind on the way past. Keep this list short. A kind nobody uses is a kind that
+// will be used wrongly.
+specification {
+  element system {
+    style {
+      shape rectangle
+      color primary
+    }
+  }
+  element container {
+    style {
+      shape rectangle
+      color secondary
+    }
+  }
+  element component {
+    style {
+      shape rectangle
+      color muted
+    }
+  }
+  element datastore {
+    technology 'Storage'
+    style {
+      shape storage
+      color muted
+    }
+  }
+  element actor {
+    style {
+      shape person
+      color secondary
+    }
+  }
+  element external {
+    style {
+      shape rectangle
+      color gray
+    }
+  }
+
+  relationship uses
+  relationship reads
+  relationship writes
+}

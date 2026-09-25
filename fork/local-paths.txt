@@ -9,3 +9,6 @@
 # Never list a file upstream ships: the loader refuses it, and such a change is
 # a layer 3 patch that lives in the commit history, not here.
 fork/
+# The wiki OpenWiki writes. Declared before it exists so the first generation
+# run does not turn every page into an orphan in the coverage check.
+openwiki/

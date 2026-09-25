@@ -1,0 +1,15 @@
+// Views are the unit the wiki embeds. A page cites a view by its id, so a view
+// id is a name other files depend on: renaming one silently empties the block it
+// feeds. `fork/openwiki-likec4.mjs check` fails when a page names a view the
+// model no longer defines, which is the guard against exactly that.
+views {
+  view index {
+    title 'Everything'
+    include *
+  }
+
+  view placeholderContext of placeholder {
+    title 'Placeholder in context'
+    include *
+  }
+}
