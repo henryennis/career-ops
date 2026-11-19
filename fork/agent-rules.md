@@ -8,3 +8,4 @@ This checkout is a fork of career-ops-hq/career-ops. The `patched` branch carrie
 4. Every commit on `patched` is one concern, subject in conventional-commit form, body ending with a trailer `Upstream-Status: Pending`, `Submitted <url>`, `Denied`, or `Inappropriate <reason>`.
 5. `fork/status.sh` shows the stack and which patches keep conflicting. Three conflicts on the same patch means: upstream it, re-express it in a lower layer, or drop it.
 6. Fork-only modes live in `fork/modes/`. When asked for a mode you do not know, look for `fork/modes/<name>.md` before saying it does not exist.
+7. Boards that answer only a browser (LinkedIn, Indeed, Jora) are read by the agent in a Steel session and written with `node fork/job-search/ingest-jobs.mts`. `.agents/skills/browser-job-search/SKILL.md` says how each board behaves and what the record holds; read it before searching or applying through a browser.
